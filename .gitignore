@@ -17,6 +17,7 @@ yarn-error.log*
 
 # Application State / Backups
 rooms-backup.json
+backups/
 
 # Environment
 .env

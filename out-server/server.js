@@ -11,9 +11,80 @@ const ws_1 = require("ws");
 const logger_1 = require("./logger");
 const patch_1 = require("./patch");
 const rateLimiter_1 = require("./rateLimiter");
+const path_1 = __importDefault(require("path"));
+const msgpackr_1 = require("msgpackr");
 const rooms = new Map();
 const joinLimiter = new rateLimiter_1.RateLimiter(60000, 20, 3 * 60000);
 const MAX_CHAT_MESSAGES = 500;
+const BACKUP_DIR = path_1.default.join(__dirname, '..', 'backups');
+const BACKUP_FILE = path_1.default.join(BACKUP_DIR, 'rooms-backup.json');
+// Ensure backup directory exists
+if (!fs_1.default.existsSync(BACKUP_DIR)) {
+    fs_1.default.mkdirSync(BACKUP_DIR, { recursive: true });
+}
+function saveRooms() {
+    const data = {};
+    for (const [roomId, room] of rooms.entries()) {
+        data[roomId] = {
+            roomId: room.roomId,
+            ownerId: room.ownerId,
+            participants: Array.from(room.participants.entries()),
+            documents: Array.from(room.documents.entries()),
+            suggestions: Array.from(room.suggestions.entries()),
+            mode: room.mode,
+            secretHash: room.secretHash,
+            chat: room.chat
+        };
+    }
+    // Write main backup
+    fs_1.default.writeFileSync(BACKUP_FILE, JSON.stringify(data, null, 2));
+    // Create timestamped backup (keep last 10)
+    const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+    const archivedFile = path_1.default.join(BACKUP_DIR, `rooms-${timestamp}.json`);
+    fs_1.default.writeFileSync(archivedFile, JSON.stringify(data, null, 2));
+    // Cleanup old backups (keep last 10)
+    try {
+        const files = fs_1.default.readdirSync(BACKUP_DIR)
+            .filter(f => f.startsWith('rooms-') && f.endsWith('.json') && f !== 'rooms-backup.json')
+            .sort()
+            .reverse();
+        if (files.length > 10) {
+            for (let i = 10; i < files.length; i++) {
+                fs_1.default.unlinkSync(path_1.default.join(BACKUP_DIR, files[i]));
+            }
+        }
+    }
+    catch (e) {
+        (0, logger_1.log)('backup_cleanup_error', { error: String(e) });
+    }
+}
+function loadRooms() {
+    if (fs_1.default.existsSync(BACKUP_FILE)) {
+        try {
+            const raw = fs_1.default.readFileSync(BACKUP_FILE, 'utf-8');
+            const data = JSON.parse(raw);
+            for (const roomId in data) {
+                const d = data[roomId];
+                rooms.set(roomId, {
+                    roomId: d.roomId,
+                    ownerId: d.ownerId,
+                    participants: new Map(d.participants),
+                    connections: new Map(),
+                    documents: new Map(d.documents),
+                    suggestions: new Map(d.suggestions),
+                    mode: d.mode,
+                    secretHash: d.secretHash,
+                    chat: d.chat || []
+                });
+                roomLastActivity.set(roomId, Date.now());
+            }
+            (0, logger_1.log)('server_start', { message: `Restored ${rooms.size} rooms from backup` });
+        }
+        catch (e) {
+            (0, logger_1.log)('error', { message: 'Failed to load rooms backup', error: String(e) });
+        }
+    }
+}
 const args = (0, minimist_1.default)(process.argv.slice(2), {
     alias: { p: 'port', h: 'host' },
     string: ['port', 'host']
@@ -24,12 +95,56 @@ const host = (args.host ?? process.env.CODEROOMS_HOST ?? fileConfig.host ?? '127
 const wss = new ws_1.WebSocketServer({ port, host });
 (0, logger_1.log)('server_listening', { host, port });
 console.log(`CodeRooms server listening on ws://${host}:${port}`);
+// Load rooms from backup on startup
+loadRooms();
+// Auto-save rooms every 30 seconds
+setInterval(() => {
+    if (rooms.size > 0) {
+        saveRooms();
+    }
+}, 30000);
+// Save rooms on shutdown
+process.on('SIGTERM', () => {
+    (0, logger_1.log)('server_shutdown', { reason: 'SIGTERM' });
+    saveRooms();
+    process.exit(0);
+});
+process.on('SIGINT', () => {
+    (0, logger_1.log)('server_shutdown', { reason: 'SIGINT' });
+    saveRooms();
+    process.exit(0);
+});
+// Idle room cleanup: remove rooms with no connections every 5 minutes
+const IDLE_ROOM_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const roomLastActivity = new Map();
+setInterval(() => {
+    const now = Date.now();
+    for (const [roomId, room] of rooms) {
+        if (room.connections.size === 0) {
+            const lastActive = roomLastActivity.get(roomId) ?? now;
+            if (now - lastActive > IDLE_ROOM_TIMEOUT_MS) {
+                rooms.delete(roomId);
+                roomLastActivity.delete(roomId);
+                (0, logger_1.log)('room_idle_cleanup', { roomId });
+            }
+        }
+        else {
+            roomLastActivity.set(roomId, now);
+        }
+    }
+}, 5 * 60 * 1000);
 wss.on('connection', (ws, request) => {
     const ip = request.socket.remoteAddress ?? 'unknown';
     const context = { ws, userId: (0, uuid_1.v4)(), ip };
     ws.on('message', payload => {
         try {
-            const message = JSON.parse(payload.toString());
+            let message;
+            if (Buffer.isBuffer(payload) || payload instanceof Uint8Array || Array.isArray(payload)) {
+                message = (0, msgpackr_1.unpack)(payload);
+            }
+            else {
+                message = JSON.parse(payload.toString());
+            }
             handleMessage(context, message);
         }
         catch (error) {
@@ -39,6 +154,16 @@ wss.on('connection', (ws, request) => {
     ws.on('close', () => {
         cleanupConnection(context);
     });
+    // Server-side ping to detect dead connections
+    const pingTimer = setInterval(() => {
+        if (ws.readyState === ws.OPEN) {
+            ws.ping();
+        }
+        else {
+            clearInterval(pingTimer);
+        }
+    }, 30000);
+    ws.on('close', () => clearInterval(pingTimer));
 });
 function handleMessage(context, message) {
     switch (message.type) {
@@ -80,6 +205,9 @@ function handleMessage(context, message) {
             break;
         case 'fullDocumentSync':
             handleFullDocumentSync(context, message);
+            break;
+        case 'cursorUpdate':
+            handleCursorUpdate(context, message);
             break;
         case 'rootCursor':
             handleRootCursor(context, message);
@@ -152,7 +280,10 @@ function joinRoom(context, roomId, displayName, secret) {
     }
     resetFailedJoin(context);
     context.roomId = roomId;
-    const defaultRole = room.mode === 'classroom' ? 'viewer' : 'collaborator';
+    // Auto-assign viewer role for large rooms (40+ participants) or classroom mode
+    const participantCount = room.participants.size;
+    const isLargeRoom = participantCount >= 40;
+    const defaultRole = room.mode === 'classroom' || isLargeRoom ? 'viewer' : 'collaborator';
     context.role = defaultRole;
     context.displayName = displayName;
     const participant = {
@@ -460,13 +591,15 @@ function handleChatSend(context, message) {
         return;
     }
     if (participant.role === 'viewer') {
+        sendError(context.ws, 'Viewers cannot send messages.', 'FORBIDDEN');
         return;
     }
     const trimmed = message.content.trim();
     if (!trimmed) {
         return;
     }
-    if (trimmed.length > 1000) {
+    if (trimmed.length > 2000) {
+        sendError(context.ws, 'Message is too long (max 2000 characters).', 'MESSAGE_TOO_LONG');
         return;
     }
     const chatMsg = {
@@ -504,7 +637,7 @@ function broadcast(room, message, except) {
     }
 }
 function send(ws, message) {
-    ws.send(JSON.stringify(message));
+    ws.send((0, msgpackr_1.pack)(message));
 }
 function sendError(ws, message, code) {
     send(ws, { type: 'error', message, code });
@@ -580,4 +713,23 @@ function loadConfig() {
         (0, logger_1.log)('config_error', { error: error instanceof Error ? error.message : String(error) });
         return {};
     }
+}
+function handleCursorUpdate(context, message) {
+    const room = getRoomForContext(context);
+    if (!room || room.roomId !== message.roomId) {
+        return;
+    }
+    const participant = room.participants.find((p) => p.userId === context.userId);
+    if (!participant)
+        return;
+    broadcast(room, {
+        type: 'cursorUpdate',
+        roomId: room.roomId,
+        userId: context.userId,
+        userName: participant.displayName,
+        docId: message.docId,
+        uri: message.uri,
+        position: message.position,
+        selections: message.selections,
+    }, context.userId);
 }

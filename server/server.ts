@@ -52,7 +52,13 @@ interface RoomState {
 const rooms = new Map<string, RoomState>();
 const joinLimiter = new RateLimiter(60_000, 20, 3 * 60_000);
 const MAX_CHAT_MESSAGES = 500;
-const BACKUP_FILE = path.join(__dirname, '..', 'rooms-backup.json');
+const BACKUP_DIR = path.join(__dirname, '..', 'backups');
+const BACKUP_FILE = path.join(BACKUP_DIR, 'rooms-backup.json');
+
+// Ensure backup directory exists
+if (!fs.existsSync(BACKUP_DIR)) {
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+}
 
 function saveRooms(): void {
   const data: Record<string, any> = {};
@@ -68,7 +74,30 @@ function saveRooms(): void {
       chat: room.chat
     };
   }
-  fs.writeFileSync(BACKUP_FILE, JSON.stringify(data));
+  
+  // Write main backup
+  fs.writeFileSync(BACKUP_FILE, JSON.stringify(data, null, 2));
+  
+  // Create timestamped backup (keep last 10)
+  const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+  const archivedFile = path.join(BACKUP_DIR, `rooms-${timestamp}.json`);
+  fs.writeFileSync(archivedFile, JSON.stringify(data, null, 2));
+  
+  // Cleanup old backups (keep last 10)
+  try {
+    const files = fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('rooms-') && f.endsWith('.json') && f !== 'rooms-backup.json')
+      .sort()
+      .reverse();
+    
+    if (files.length > 10) {
+      for (let i = 10; i < files.length; i++) {
+        fs.unlinkSync(path.join(BACKUP_DIR, files[i]));
+      }
+    }
+  } catch (e) {
+    log('backup_cleanup_error', { error: String(e) });
+  }
 }
 
 function loadRooms(): void {
@@ -111,6 +140,29 @@ const wss = new WebSocketServer({ port, host });
 
 log('server_listening', { host, port });
 console.log(`CodeRooms server listening on ws://${host}:${port}`);
+
+// Load rooms from backup on startup
+loadRooms();
+
+// Auto-save rooms every 30 seconds
+setInterval(() => {
+  if (rooms.size > 0) {
+    saveRooms();
+  }
+}, 30_000);
+
+// Save rooms on shutdown
+process.on('SIGTERM', () => {
+  log('server_shutdown', { reason: 'SIGTERM' });
+  saveRooms();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  log('server_shutdown', { reason: 'SIGINT' });
+  saveRooms();
+  process.exit(0);
+});
 
 // Idle room cleanup: remove rooms with no connections every 5 minutes
 const IDLE_ROOM_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
@@ -300,7 +352,10 @@ function joinRoom(context: ConnectionContext, roomId: string, displayName: strin
   resetFailedJoin(context);
 
   context.roomId = roomId;
-  const defaultRole: Role = room.mode === 'classroom' ? 'viewer' : 'collaborator';
+  // Auto-assign viewer role for large rooms (40+ participants) or classroom mode
+  const participantCount = room.participants.size;
+  const isLargeRoom = participantCount >= 40;
+  const defaultRole: Role = room.mode === 'classroom' || isLargeRoom ? 'viewer' : 'collaborator';
   context.role = defaultRole;
   context.displayName = displayName;
 
@@ -723,7 +778,7 @@ function broadcast(room: RoomState, message: ServerToClientMessage, except?: Web
 }
 
 function send(ws: WebSocket, message: ServerToClientMessage): void {
-  ws.send(JSON.stringify(message));
+  ws.send(pack(message));
 }
 
 function sendError(ws: WebSocket, message: string, code?: string): void {
