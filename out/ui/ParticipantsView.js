@@ -70,7 +70,7 @@ class ActionItem extends vscode.TreeItem {
     }
 }
 class ParticipantItem extends vscode.TreeItem {
-    constructor(participant, isSelf, canManage, isTyping) {
+    constructor(participant, isSelf, canManage, isTyping, currentFile) {
         const name = isSelf ? `${participant.displayName} (you)` : participant.displayName;
         const modeDetail = participant.role === 'collaborator'
             ? participant.isDirectEditMode ? 'direct' : 'suggest'
@@ -82,10 +82,23 @@ class ParticipantItem extends vscode.TreeItem {
             descriptionParts.push(modeDetail);
         }
         if (isTyping) {
-            descriptionParts.push('typing');
+            descriptionParts.push('typing…');
         }
         this.description = descriptionParts.join(' · ');
-        this.tooltip = `${participant.displayName}\nRole: ${roleBadge(participant.role)}${modeDetail ? ` (${modeDetail})` : ''}${isTyping ? '\nTyping now' : ''}`;
+        const tooltipLines = [`**${participant.displayName}**`];
+        tooltipLines.push(`Role: ${roleBadge(participant.role)}`);
+        if (modeDetail) {
+            tooltipLines.push(`Edit mode: ${modeDetail}`);
+        }
+        if (isTyping) {
+            tooltipLines.push(`✍️ Currently typing`);
+        }
+        if (canManage && !isSelf) {
+            tooltipLines.push(`\n_Click to change role_`);
+        }
+        const md = new vscode.MarkdownString(tooltipLines.join('\n\n'));
+        md.isTrusted = true;
+        this.tooltip = md;
         this.iconPath = (0, participantsIcons_1.roleIcon)(participant.role);
         if (canManage && !isSelf) {
             this.command = { command: 'coderooms.changeParticipantRole', title: 'Change role', arguments: [participant] };
@@ -124,8 +137,17 @@ class SuggestionItem extends vscode.TreeItem {
         const label = range ? `${fileLabel} ${range}` : fileLabel;
         super(label, vscode.TreeItemCollapsibleState.None);
         this.suggestion = suggestion;
-        this.description = suggestion.authorName;
-        this.tooltip = suggestion.patches[0]?.text || 'Suggested edit';
+        const preview = (suggestion.patches[0]?.text || '').slice(0, 60);
+        const truncated = preview.length < (suggestion.patches[0]?.text || '').length ? preview + '…' : preview;
+        this.description = `${suggestion.authorName} • ${suggestion.patches.length} patch${suggestion.patches.length !== 1 ? 'es' : ''}`;
+        const md = new vscode.MarkdownString();
+        md.isTrusted = true;
+        md.appendMarkdown(`**Suggestion from ${suggestion.authorName}**\n\n`);
+        if (truncated) {
+            md.appendCodeblock(truncated, 'text');
+        }
+        md.appendMarkdown(`\n\n${suggestion.patches.length} patch${suggestion.patches.length !== 1 ? 'es' : ''} · ${new Date(suggestion.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+        this.tooltip = md;
         this.iconPath = new vscode.ThemeIcon('lightbulb');
         this.contextValue = 'coderooms.suggestion.root';
     }
@@ -232,10 +254,22 @@ class ParticipantsView {
             descriptionParts.push('disconnected');
         }
         const icon = roomId ? (0, participantsIcons_1.roleIcon)(role) : new vscode.ThemeIcon('debug-disconnect');
-        const header = new BlockItem(Block.Session, roomId ? `Room ${roomId}` : 'Session', descriptionParts.join(' · ') || undefined, icon);
-        header.tooltip = roomId
-            ? `Connected to CodeRoom ${roomId}${role ? ` as ${roleBadge(role)}` : ''}${mode ? ` • ${mode}` : ''}`
-            : 'Start or join a CodeRoom to collaborate.';
+        const header = new BlockItem(Block.Session, roomId ? `Room ${roomId}` : 'CodeRooms', descriptionParts.join(' · ') || undefined, icon);
+        const md = new vscode.MarkdownString();
+        md.isTrusted = true;
+        if (roomId) {
+            md.appendMarkdown(`**Room:** \`${roomId}\`\n\n`);
+            if (role) {
+                md.appendMarkdown(`**Role:** ${roleBadge(role)}\n\n`);
+            }
+            if (mode) {
+                md.appendMarkdown(`**Mode:** ${mode}`);
+            }
+        }
+        else {
+            md.appendMarkdown('Start or join a CodeRoom to collaborate in real time.');
+        }
+        header.tooltip = md;
         return header;
     }
     buildSessionBlock() {
@@ -344,7 +378,10 @@ class ParticipantsView {
             }
             return a.displayName.localeCompare(b.displayName);
         })
-            .map(participant => new ParticipantItem(participant, participant.userId === currentId, isRootUser, this.roomState.isParticipantTyping(participant.userId))));
+            .map(participant => {
+            const currentFile = this.roomState.getParticipantFile(participant.userId);
+            return new ParticipantItem(participant, participant.userId === currentId, isRootUser, this.roomState.isParticipantTyping(participant.userId), currentFile);
+        }));
         return items;
     }
     countRoles() {

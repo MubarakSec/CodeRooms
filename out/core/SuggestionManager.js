@@ -44,8 +44,20 @@ class SuggestionManager {
         this.changeEmitter = new vscode.EventEmitter();
         this.onDidChange = this.changeEmitter.event;
         this.decorationType = vscode.window.createTextEditorDecorationType({
-            backgroundColor: 'rgba(255, 231, 168, 0.35)',
-            border: '1px dashed rgba(255, 152, 0, 0.7)'
+            backgroundColor: 'rgba(255, 186, 73, 0.18)',
+            border: '1.5px solid rgba(255, 152, 0, 0.65)',
+            borderRadius: '3px',
+            gutterIconPath: undefined,
+            gutterIconSize: 'contain',
+            overviewRulerColor: 'rgba(255, 152, 0, 0.65)',
+            overviewRulerLane: vscode.OverviewRulerLane.Left,
+            isWholeLine: false,
+            after: {
+                contentText: ' 💡',
+                color: 'rgba(255, 152, 0, 0.8)',
+                fontStyle: 'italic',
+                margin: '0 0 0 8px'
+            }
         });
         this.disposables.push(vscode.window.onDidChangeActiveTextEditor(() => this.refreshDecorations()), vscode.workspace.onDidChangeTextDocument(() => this.refreshDecorations()), this.changeEmitter);
     }
@@ -124,10 +136,19 @@ class SuggestionManager {
         }
         const decorations = Array.from(this.suggestions.values())
             .filter(suggestion => suggestion.docId === activeDocId)
-            .flatMap(suggestion => suggestion.patches.map(patch => ({
-            range: this.rangeFromPatch(patch),
-            hoverMessage: `${suggestion.authorName} suggested: ${patch.text || 'Edit'}`
-        })));
+            .flatMap(suggestion => suggestion.patches.map(patch => {
+            const preview = (patch.text || 'Remove text').slice(0, 80);
+            const truncated = preview.length < (patch.text || '').length ? preview + '…' : preview;
+            const hover = new vscode.MarkdownString();
+            hover.isTrusted = true;
+            hover.appendMarkdown(`**💡 Suggestion from ${suggestion.authorName}**\n\n`);
+            hover.appendCodeblock(truncated, 'text');
+            hover.appendMarkdown(`\n\n_Use the Suggestions panel to accept or reject_`);
+            return {
+                range: this.rangeFromPatch(patch),
+                hoverMessage: hover
+            };
+        }));
         editor.setDecorations(this.decorationType, decorations);
     }
     rangeFromPatch(patch) {

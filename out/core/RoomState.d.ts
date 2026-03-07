@@ -7,6 +7,7 @@ export declare class RoomState {
     private participants;
     private collaboratorDirectMode;
     private participantActivity;
+    private participantFiles;
     private mode?;
     private activeSharedDocLabel?;
     setSelfInfo(userId: string, role: Role, roomId?: string, displayName?: string): void;
@@ -29,6 +30,8 @@ export declare class RoomState {
     setActiveSharedDocLabel(label?: string): void;
     getActiveSharedDocLabel(): string | undefined;
     setParticipantActivity(userId: string, at: number): void;
+    setParticipantFile(userId: string, file: string): void;
+    getParticipantFile(userId: string): string | undefined;
     isParticipantTyping(userId: string): boolean;
     setMode(mode: RoomMode | undefined): void;
     getRoomMode(): RoomMode | undefined;

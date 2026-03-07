@@ -48,6 +48,7 @@ const FollowController_1 = require("./core/FollowController");
 const RoomStorage_1 = require("./core/RoomStorage");
 const SuggestionManager_1 = require("./core/SuggestionManager");
 const ChatManager_1 = require("./core/ChatManager");
+const CursorManager_1 = require("./core/CursorManager");
 const StatusBarManager_1 = require("./ui/StatusBarManager");
 const ParticipantsView_1 = require("./ui/ParticipantsView");
 const ChatView_1 = require("./ui/ChatView");
@@ -170,6 +171,7 @@ function activate(context) {
     const suggestionManager = new SuggestionManager_1.SuggestionManager(roomState, documentSync);
     const participantsView = new ParticipantsView_1.ParticipantsView(roomState, documentSync, suggestionManager, followController);
     const chatManager = new ChatManager_1.ChatManager(context.globalState);
+    const cursorManager = new CursorManager_1.CursorManager();
     const chatView = new ChatView_1.ChatView(chatManager);
     let lastJoinRoomId;
     let lastJoinDisplayName;
@@ -183,11 +185,11 @@ function activate(context) {
     });
     let pendingRootCursorEditor;
     let rootCursorTimer;
-    const rootCursorDebounceMs = 150;
+    const getRootCursorDebounceMs = () => {
+        const participants = roomState.getParticipants().length;
+        return Math.min(150 + (participants * 30), 1000);
+    };
     const sendRootCursorUpdate = (editor) => {
-        if (!roomState.isRoot()) {
-            return;
-        }
         const roomId = roomState.getRoomId();
         const docId = documentSync.getActiveDocumentId();
         const sharedUri = documentSync.getSharedDocumentUri();
@@ -198,12 +200,27 @@ function activate(context) {
             return;
         }
         const pos = editor.selection.active;
+        const position = { line: pos.line, character: pos.character };
+        const selections = editor.selections.map(s => ({
+            start: { line: s.start.line, character: s.start.character },
+            end: { line: s.end.line, character: s.end.character }
+        }));
+        if (roomState.isRoot()) {
+            sendClientMessage({
+                type: 'rootCursor',
+                roomId,
+                docId,
+                uri: sharedUri.toString(),
+                position
+            });
+        }
         sendClientMessage({
-            type: 'rootCursor',
+            type: 'cursorUpdate',
             roomId,
             docId,
             uri: sharedUri.toString(),
-            position: { line: pos.line, character: pos.character }
+            position,
+            selections
         });
     };
     const scheduleRootCursorBroadcast = (editor) => {
@@ -221,7 +238,7 @@ function activate(context) {
             if (target) {
                 sendRootCursorUpdate(target);
             }
-        }, rootCursorDebounceMs);
+        }, getRootCursorDebounceMs());
     };
     suggestionManager.setHandlers(suggestion => documentSync.acceptSuggestion(suggestion), suggestion => documentSync.rejectSuggestion(suggestion));
     const explorerTree = vscode.window.createTreeView('coderoomsParticipants', {
@@ -233,8 +250,9 @@ function activate(context) {
     });
     participantsView.registerTreeView('coderoomsPanel', sessionTree);
     const activeEditorListener = vscode.window.onDidChangeActiveTextEditor(editor => scheduleRootCursorBroadcast(editor));
+    const visibleEditorsListener = vscode.window.onDidChangeVisibleTextEditors(() => cursorManager.refreshDecorations());
     const selectionListener = vscode.window.onDidChangeTextEditorSelection(event => scheduleRootCursorBroadcast(event.textEditor));
-    context.subscriptions.push(explorerTree, sessionTree, vscode.window.registerWebviewViewProvider('coderoomsChatView', chatView), activeEditorListener, selectionListener, followDisposable, { dispose: () => webSocket.disconnect() }, { dispose: () => suggestionManager.dispose() }, { dispose: () => documentSync.dispose() }, { dispose: () => statusBar.dispose() });
+    context.subscriptions.push(explorerTree, sessionTree, vscode.window.registerWebviewViewProvider('coderoomsChatView', chatView), activeEditorListener, visibleEditorsListener, selectionListener, followDisposable, { dispose: () => webSocket.disconnect() }, { dispose: () => suggestionManager.dispose() }, { dispose: () => documentSync.dispose() }, { dispose: () => statusBar.dispose() });
     suggestionManager.onDidChange(() => participantsView.refresh());
     documentSync.onDidChangeSharedDocument(() => participantsView.refresh());
     const scheduleRefresh = () => {
@@ -250,10 +268,29 @@ function activate(context) {
     webSocket.on('message', message => {
         void handleServerMessage(message);
     });
+    webSocket.on('connected', () => {
+        isConnected = true;
+        statusBar.setConnectionState('connected');
+        flushPending();
+        // If we were in a room before disconnect, attempt to rejoin
+        if (lastJoinRoomId && lastJoinDisplayName) {
+            webSocket.send({ type: 'joinRoom', roomId: lastJoinRoomId, displayName: lastJoinDisplayName });
+        }
+    });
+    webSocket.on('reconnecting', (info) => {
+        statusBar.setConnectionState('reconnecting', `Reconnecting in ${Math.round(info.delayMs / 1000)}s...`, info.attempt);
+    });
+    webSocket.on('reconnectFailed', () => {
+        statusBar.setConnectionState('error', 'Could not reconnect after multiple attempts');
+        void vscode.window.showErrorMessage('CodeRooms: unable to reconnect to the server after multiple attempts.', 'Retry').then(action => {
+            if (action === 'Retry') {
+                void ensureConnection(ConnectionIntent.ForceReconnect);
+            }
+        });
+    });
     webSocket.on('close', () => {
         isConnected = false;
         statusBar.setConnectionState('disconnected', 'Connection closed');
-        void vscode.window.showWarningMessage('Disconnected from CodeRooms server.');
         resetState();
     });
     function resetState() {
@@ -262,6 +299,7 @@ function activate(context) {
         suggestionManager.reset();
         followController.reset();
         chatManager.clear();
+        cursorManager.clearAll();
         chatManager.setRoom(undefined);
         pendingOffline.splice(0, pendingOffline.length);
         pendingAck.clear();
@@ -333,6 +371,25 @@ function activate(context) {
                 await recordRoomInfo(message.roomId, message.mode);
                 roomState.setParticipants(message.participants);
                 chatManager.setRoom(message.roomId);
+                let welcomeText = `\`\`\n��� Welcome to the CodeRoom! You joined as a ${message.role}.\n\`\`\n`;
+                if (message.role === 'collaborator') {
+                    welcomeText += `��� **Suggest Mode:** By default, edits you make turn into inline suggestions for the room owner to approve!\n��� **Direct Edit:** To bypass suggestions and type directly, click the pencil icon in the People panel or toggle the "Suggest" Status Bar item.`;
+                }
+                else if (message.role === 'viewer') {
+                    welcomeText += `���️ **Read Only:** You are currently in read-only mode.`;
+                }
+                else {
+                    welcomeText += `��� **Owner:** You are the room owner. To share files, open a document and click the "Share Document" icon in the top right window menu, or right click it in the explorer!`;
+                }
+                chatManager.addMessage({
+                    messageId: `sys-welcome-${Date.now()}`,
+                    fromUserId: 'system',
+                    fromName: 'System',
+                    role: 'root',
+                    content: welcomeText,
+                    timestamp: Date.now(),
+                    isSystem: true
+                });
                 statusBar.update();
                 scheduleRefresh();
                 break;
@@ -356,6 +413,7 @@ function activate(context) {
             }
             case 'participantLeft': {
                 roomState.removeParticipant(message.userId);
+                cursorManager.removeCursor(message.userId);
                 await logRoomEvent({ type: 'left', userId: message.userId });
                 scheduleRefresh();
                 const pendingTimer = pendingRoleUpdates.get(message.userId);
@@ -427,6 +485,15 @@ function activate(context) {
                 pendingAck.delete(`reqfull:${message.docId}`);
                 break;
             }
+            case 'cursorUpdate': {
+                if (message.userId && message.userName) {
+                    cursorManager.updateCursor(message.userId, message.userName, message.uri, message.position, message.selections);
+                    const fileName = decodeURIComponent(message.uri.split("/").pop() || "Unknown");
+                    roomState.setParticipantFile(message.userId, fileName);
+                    scheduleRefresh();
+                }
+                break;
+            }
             case 'rootCursor': {
                 lastRootCursorMessage = message;
                 if (followController.isFollowing()) {
@@ -487,6 +554,12 @@ function activate(context) {
             case 'error': {
                 const payload = message.message || 'Unknown error';
                 switch (message.code) {
+                    case 'FORBIDDEN':
+                        void vscode.window.showErrorMessage('Action denied: only the room owner can perform this.');
+                        break;
+                    case 'TARGET_NOT_FOUND':
+                        void vscode.window.showErrorMessage('The participant was not found. They may have left the room.');
+                        break;
                     case 'ROOM_SECRET_REQUIRED':
                         await retryJoinWithSecret('This room requires a secret. Please enter the secret and try again.');
                         break;
@@ -499,16 +572,28 @@ function activate(context) {
                     case 'ROOM_NOT_FOUND':
                         void vscode.window.showErrorMessage('Room not found. Double-check the invite code.');
                         break;
+                    case 'PATCH_INVALID':
+                        void vscode.window.showWarningMessage('A document change failed to apply on the server. The file will resync automatically.');
+                        break;
+                    case 'MESSAGE_TOO_LONG':
+                        void vscode.window.showWarningMessage('Message is too long (max 2000 characters).');
+                        break;
                     default:
                         if (payload.toLowerCase().includes('room not found')) {
                             void vscode.window.showErrorMessage('Room not found. Double-check the invite code.');
                         }
+                        else if (payload.toLowerCase().includes('room closed')) {
+                            void vscode.window.showWarningMessage('The room has been closed by the owner.');
+                            resetState();
+                        }
                         else {
-                            void vscode.window.showErrorMessage(payload);
+                            void vscode.window.showErrorMessage(`CodeRooms: ${payload}`);
                         }
                 }
-                statusBar.setConnectionState('error', payload);
-                void vscode.window.showWarningMessage(`CodeRooms error: ${payload}`);
+                // Only set status bar to error for critical issues, not transient ones
+                if (['ROOM_NOT_FOUND', 'RATE_LIMITED'].includes(message.code ?? '')) {
+                    statusBar.setConnectionState('error', payload);
+                }
                 // On server error, drop any matching pending ack for safety.
                 if (message.code === 'ROOM_NOT_FOUND' && roomState.getRoomId()) {
                     pendingAck.clear();

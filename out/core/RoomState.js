@@ -6,6 +6,7 @@ class RoomState {
         this.participants = [];
         this.collaboratorDirectMode = false;
         this.participantActivity = new Map();
+        this.participantFiles = new Map();
     }
     setSelfInfo(userId, role, roomId, displayName) {
         this.userId = userId;
@@ -26,6 +27,7 @@ class RoomState {
         this.participants = [];
         this.collaboratorDirectMode = false;
         this.participantActivity.clear();
+        this.participantFiles.clear();
         this.mode = undefined;
     }
     setParticipants(list) {
@@ -34,6 +36,8 @@ class RoomState {
         for (const [userId] of this.participantActivity) {
             if (!activeIds.has(userId)) {
                 this.participantActivity.delete(userId);
+                this.participantFiles.delete(userId);
+                this.participantFiles.delete(userId);
             }
         }
         this.syncCollaboratorMode();
@@ -51,6 +55,8 @@ class RoomState {
             this.collaboratorDirectMode = false;
         }
         this.participantActivity.delete(userId);
+        this.participantFiles.delete(userId);
+        this.participantFiles.delete(userId);
     }
     updateParticipantRole(userId, role) {
         this.participants = this.participants.map(p => p.userId === userId
@@ -109,6 +115,12 @@ class RoomState {
     }
     setParticipantActivity(userId, at) {
         this.participantActivity.set(userId, at);
+    }
+    setParticipantFile(userId, file) {
+        this.participantFiles.set(userId, file);
+    }
+    getParticipantFile(userId) {
+        return this.participantFiles.get(userId);
     }
     isParticipantTyping(userId) {
         const at = this.participantActivity.get(userId);

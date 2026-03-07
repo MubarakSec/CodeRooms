@@ -325,9 +325,10 @@ class DocumentSync {
             logger_1.logger.info(`[CodeRooms] Ignoring stale patch for docId=${docId} at version=${version}`);
             return;
         }
+        const currentRoomId = this.getEffectiveRoomId();
         if (version > tracked.version + 1) {
             // Micro-merge attempt: if gap is exactly 1 version (missing a single step), try applying anyway, otherwise full sync.
-            if (version === tracked.version + 2) {
+            if (version === tracked.version + 2 && currentRoomId) {
                 const merged = await this.applyPatch(document, patch);
                 if (merged) {
                     tracked.version = version;
@@ -349,9 +350,13 @@ class DocumentSync {
                 this.requestFullSyncForDoc(docId);
                 void vscode.window.showWarningMessage('Resyncing shared file due to patch mismatch.', 'Retry now').then(action => {
                     if (action === 'Retry now') {
+                        const roomId = this.getEffectiveRoomId();
+                        if (!roomId) {
+                            return;
+                        }
                         this.sendMessage({
                             type: 'requestFullSync',
-                            roomId: this.getEffectiveRoomId() ?? '',
+                            roomId,
                             docId
                         });
                     }
@@ -677,8 +682,10 @@ class DocumentSync {
         return activeId ? this.documents.get(activeId) : undefined;
     }
     scheduleFlush(docId) {
-        if (this.pendingDocFlush.has(docId)) {
-            return;
+        // If a flush is already scheduled, extend the window so rapid-fire changes are coalesced
+        const existingTimer = this.pendingDocFlush.get(docId);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
         }
         const timer = setTimeout(() => {
             this.pendingDocFlush.delete(docId);
