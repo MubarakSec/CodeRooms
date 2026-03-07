@@ -80,11 +80,12 @@ export function generatePassphrase(): string {
     'sierra', 'tango', 'uniform', 'victor', 'whiskey', 'xray',
     'yankee', 'zulu'
   ];
-  
+
   const randomWords: string[] = [];
+  const bytes = crypto.randomBytes(4);
   for (let i = 0; i < 4; i++) {
-    randomWords.push(words[Math.floor(Math.random() * words.length)]);
+    randomWords.push(words[bytes[i] % words.length]);
   }
-  
+
   return randomWords.join('-');
 }

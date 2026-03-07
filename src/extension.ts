@@ -602,6 +602,12 @@ export function activate(context: vscode.ExtensionContext): void {
           case 'MESSAGE_TOO_LONG':
             void vscode.window.showWarningMessage('Message is too long (max 2000 characters).');
             break;
+          case 'PAYLOAD_TOO_LARGE':
+            void vscode.window.showWarningMessage('The file is too large to share (max 2 MB).');
+            break;
+          case 'DOCUMENT_TOO_LARGE':
+            void vscode.window.showWarningMessage('The document is too large to share (max 2 MB).');
+            break;
           default:
             if (payload.toLowerCase().includes('room not found')) {
               void vscode.window.showErrorMessage('Room not found. Double-check the invite code.');

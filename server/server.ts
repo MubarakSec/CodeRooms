@@ -1,4 +1,4 @@
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import fs from 'fs';
 import minimist from 'minimist';
 import { v4 as uuidv4 } from 'uuid';
@@ -184,12 +184,27 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+const MAX_MESSAGE_BYTES = 512 * 1024; // 512 KB hard limit per message
+const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024; // 2 MB limit for shared documents
+
 wss.on('connection', (ws, request) => {
   const ip = request.socket.remoteAddress ?? 'unknown';
   const context: ConnectionContext = { ws, userId: uuidv4(), ip };
 
   ws.on('message', payload => {
     try {
+      // Enforce hard payload size limit before unpacking
+      const byteLength = Buffer.isBuffer(payload)
+        ? payload.byteLength
+        : Array.isArray(payload)
+          ? payload.reduce((acc, b) => acc + b.byteLength, 0)
+          : Buffer.byteLength(payload.toString());
+
+      if (byteLength > MAX_MESSAGE_BYTES) {
+        sendError(ws, 'Payload too large', 'PAYLOAD_TOO_LARGE');
+        return;
+      }
+
       let message: ClientToServerMessage;
       if (Buffer.isBuffer(payload) || payload instanceof Uint8Array || Array.isArray(payload)) {
         message = unpack(payload as Buffer);
@@ -260,7 +275,7 @@ function handleMessage(context: ConnectionContext, message: ClientToServerMessag
       handleFullDocumentSync(context, message);
       break;
     case 'cursorUpdate':
-      handleCursorUpdate(context, message as any);
+      handleCursorUpdate(context, message);
       break;
     case 'rootCursor':
       handleRootCursor(context, message);
@@ -461,6 +476,11 @@ function setEditMode(context: ConnectionContext, userId: string, direct: boolean
 function handleShareDocument(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'shareDocument' }>): void {
   const room = getRoomForContext(context);
   if (!room || context.userId !== room.ownerId) {
+    return;
+  }
+
+  if (Buffer.byteLength(message.text, 'utf8') > MAX_DOCUMENT_BYTES) {
+    sendError(context.ws, 'Document is too large to share (max 2 MB).', 'DOCUMENT_TOO_LARGE');
     return;
   }
 
@@ -810,8 +830,9 @@ function getRoomForContext(context: ConnectionContext): RoomState | undefined {
 function generateRoomId(): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
+  const bytes = randomBytes(6);
   for (let i = 0; i < 6; i++) {
-    code += alphabet[Math.floor(Math.random() * alphabet.length)];
+    code += alphabet[bytes[i] % alphabet.length];
   }
   if (rooms.has(code)) {
     return generateRoomId();
@@ -873,7 +894,7 @@ function handleCursorUpdate(
   if (!room || room.roomId !== message.roomId) {
     return;
   }
-  const participant = room.participants.find((p) => p.userId === context.userId);
+  const participant = room.participants.get(context.userId);
   if (!participant) return;
 
   broadcast(
@@ -888,6 +909,6 @@ function handleCursorUpdate(
       position: message.position,
       selections: message.selections,
     },
-    context.userId
+    context.ws
   );
 }

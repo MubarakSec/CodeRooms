@@ -47,6 +47,7 @@ export type ClientToServerMessage =
   | { type: "requestFullSync"; roomId: string; docId: string }
   | { type: "fullDocumentSync"; roomId: string; docId: string; text: string; version: number }
   | { type: "rootCursor"; roomId: string; docId: string; uri: string; position: Position }
+  | { type: "cursorUpdate"; roomId: string; userId?: string; userName?: string; docId: string; uri: string; position: Position; selections?: { start: Position; end: Position }[] }
   | { type: "participantActivity"; roomId: string; userId: string; activity: "typing" | "idle"; at: number }
   | { type: "chatSend"; roomId: string; messageId: string; content: string; timestamp: number };
 
@@ -66,6 +67,7 @@ export type ServerToClientMessage =
   | { type: "suggestionAccepted"; suggestionId: string; docId: string }
   | { type: "suggestionRejected"; suggestionId: string; docId: string }
   | { type: "rootCursor"; roomId: string; docId: string; uri: string; position: Position }
+  | { type: "cursorUpdate"; roomId: string; userId?: string; userName?: string; docId: string; uri: string; position: Position; selections?: { start: Position; end: Position }[] }
   | { type: "participantActivity"; roomId: string; userId: string; activity: "typing" | "idle"; at: number }
   | {
       type: "chatMessage";

@@ -28,6 +28,7 @@ backups/
 
 # Testing
 coverage/
+node_modules/.vite/
 
 # Misc
 .DS_Store

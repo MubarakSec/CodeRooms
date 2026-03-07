@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
+import { pack, unpack } from 'msgpackr';
 import { ClientToServerMessage, ServerToClientMessage } from './MessageTypes';
 import { logger } from '../util/logger';
 
@@ -70,7 +71,12 @@ export class WebSocketClient extends EventEmitter {
 
       socket.on('message', (data) => {
         try {
-          const parsed = JSON.parse(data.toString()) as ServerToClientMessage;
+          let parsed: ServerToClientMessage;
+          if (Buffer.isBuffer(data) || data instanceof Uint8Array) {
+            parsed = unpack(data as Buffer) as ServerToClientMessage;
+          } else {
+            parsed = JSON.parse(data.toString()) as ServerToClientMessage;
+          }
           this.emit('message', parsed);
         } catch (error) {
           logger.error(`Failed to parse WebSocket message: ${String(error)}`);
@@ -172,7 +178,7 @@ export class WebSocketClient extends EventEmitter {
       logger.warn('WebSocket is not connected; unable to send message.');
       return;
     }
-    this.socket.send(JSON.stringify(message));
+    this.socket.send(pack(message));
   }
 
   isOpen(): boolean {
