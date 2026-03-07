@@ -185,6 +185,11 @@ export class WebSocketClient extends EventEmitter {
     return this.socket?.readyState === WebSocket.OPEN;
   }
 
+  /** True when the client intends to reconnect (auto-reconnect in progress). */
+  isAutoReconnecting(): boolean {
+    return !this.intentionalClose && this.reconnectOptions.enabled && this.reconnectAttempt < this.reconnectOptions.maxAttempts;
+  }
+
   getReconnectAttempt(): number {
     return this.reconnectAttempt;
   }

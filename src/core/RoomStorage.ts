@@ -134,7 +134,7 @@ export class RoomStorage {
   }
 
   getRoomFolder(roomId: string): string {
-    return path.join(this.roomsRoot, roomId);
+    return path.join(this.roomsRoot, path.basename(roomId));
   }
 
   private async ensureRoomFolders(roomId: string): Promise<string> {
@@ -146,7 +146,7 @@ export class RoomStorage {
   }
 
   private async readMetadata(roomId: string): Promise<RoomMetadata> {
-    const roomFolder = path.join(this.roomsRoot, roomId);
+    const roomFolder = path.join(this.roomsRoot, path.basename(roomId));
     const metadataPath = path.join(roomFolder, 'room.json');
 
     try {
@@ -159,7 +159,7 @@ export class RoomStorage {
   }
 
   private async writeMetadata(roomId: string, metadata: RoomMetadata): Promise<void> {
-    const roomFolder = path.join(this.roomsRoot, roomId);
+    const roomFolder = path.join(this.roomsRoot, path.basename(roomId));
     await this.ensureDir(roomFolder);
     const metadataPath = path.join(roomFolder, 'room.json');
     await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf8');

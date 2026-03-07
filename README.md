@@ -1,57 +1,155 @@
 ﻿# CodeRooms
 
-CodeRooms is a VSCode extension plus a lightweight Node.js WebSocket server for role-based, real-time collaboration. It keeps the workflow inside the editor: no screen sharing, just shared buffers, roles, and quick actions.
+<p align="center">
+  <img src="media/icon.png" alt="CodeRooms" width="128" />
+</p>
+
+Real-time collaborative coding inside VS Code — no screen sharing, just shared buffers, roles, and quick actions. CodeRooms pairs a lightweight Node.js WebSocket server with a VS Code extension so teams can create rooms, share documents, chat, and code together without leaving the editor.
+
+> **See [INSTALLATION.md](INSTALLATION.md) for detailed setup instructions.**
+
+---
 
 ## Features
-- Create/join rooms with roles (`root`, `collaborator`, `viewer`) and optional room secrets (hashed on the server).
-- Root owners manage roles, toggle collaborator direct/suggestion modes, and share/unshare multiple documents per room.
-- Live document sync with incremental patches and per-document versions; collaborators can follow the root cursor.
-- Suggestion mode captures collaborator edits as patches the root can accept/reject; suggestions are also highlighted in the editor for the root.
-- Participants tree + status bar shortcuts for room IDs, document switching, follow mode, and room admin actions.
 
-## Getting Started
-1. **Install dependencies**
-   ```bash
-   npm install
-   ```
-2. **Build the extension**
-   ```bash
-   npm run compile
-   ```
-3. **Run tests (patch logic)**
-   ```bash
-   npm test
-   ```
-4. **Launch in VSCode**
-   - Press `F5` (Run Extension) or use the "Run and Debug" panel with the default launch config. The extension activates when any CodeRooms command is invoked.
+| Area | What you get |
+|------|-------------|
+| **Rooms & Roles** | Create or join rooms with `root`, `collaborator`, or `viewer` roles. Protect rooms with a secret (hashed with PBKDF2 on the server). |
+| **Document Sharing** | Root shares any open file; collaborators see edits in real time via incremental patches with server-side OT (Operational Transform). |
+| **Suggestion Mode** | Collaborator edits become inline suggestions the root can accept or reject — great for code reviews and teaching. |
+| **Direct Edit Mode** | Toggle collaborators into direct edit mode when free-form collaboration is preferred. |
+| **Encrypted Chat** | In-editor chat panel with end-to-end encryption (AES-256-GCM) when a room secret is provided. |
+| **Follow Cursor** | Collaborators can follow the root's cursor across files in real time. |
+| **Participants Panel** | Tree view showing who's in the room, their role, edit mode, and activity status. |
+| **Invite Tokens** | Generate single-use invite tokens for secure room access. |
+| **Room Export** | Root can export the entire room (all shared documents) as a `.zip` archive. |
+| **Persistence** | Server persists room state with atomic JSON backups and auto-restores on restart. |
+| **Rate Limiting** | Per-IP connection, room, join-attempt, chat, and suggestion rate limits server-side. |
 
-## Running the coordination server
-The server lives in `server/server.ts` (TypeScript + `ws`). Build and run:
+---
+
+## Quick Start
+
 ```bash
-npm run server:build   # emits JS into out-server/
-npm run server:start   # starts the WebSocket server
+# 1. Clone and install
+git clone https://github.com/mobta/CodeRooms.git
+cd CodeRooms
+npm install
+
+# 2. Build and start the server
+npm run server:build
+npm run server:start
+
+# 3. Launch the extension
+# Open the repo in VS Code → press F5 → "Run Extension"
 ```
-CLI flags and env:
-- `--port` (default `5171`), `--host` (default `127.0.0.1` or `CODEROOMS_HOST`)
-- Environment overrides: `CODEROOMS_PORT`, `CODEROOMS_HOST`
-- Optional config file: place `coderooms.config.json` next to `server/server.ts` with `{ "host": "0.0.0.0", "port": 5171 }` to set defaults.
 
-At startup the server logs a JSON line with the chosen host/port. Point the extension at your server via **Settings → CodeRooms → Server Url**.
+In the Extension Development Host, run **CodeRooms: Start Room as Root** from the Command Palette.
 
-## Extension configuration
-- `coderooms.serverUrl`: WebSocket URL for the coordination server.
-- `coderooms.mode`: default room mode (`team` or `classroom`).
-- Room secrets: When creating or joining, you can enter a secret. If a room is secret-protected, joining without the secret or with a wrong one returns a clear error.
+> Full setup details, TLS configuration, and packaging instructions are in **[INSTALLATION.md](INSTALLATION.md)**.
 
-## Commands (high level)
-- Start/Join/Leave room; Copy room ID; Export room archive (root).
-- Share current file / Share another file (root), stop sharing active file (root), set active shared document.
-- Toggle collaborator mode (direct vs suggestion), toggle follow-root cursor (collaborators).
-- Role management (root): change role, kick to viewer mode.
-- Accept/Reject suggestions (root).
+---
 
-## Security notes (MVP)
-- In-memory server state; no persistence for rooms beyond in-process memory.
-- No TLS termination is provided; run behind a TLS-terminating reverse proxy for internet use.
-- Room secrets are hashed with SHA-256 on the server; basic rate limiting applies to join failures per IP.
-- Document data is stored locally on each participant machine; exported archives are not encrypted.
+## Extension Settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `coderooms.serverUrl` | `string` | `ws://localhost:5171` | WebSocket URL for the coordination server. |
+| `coderooms.mode` | `enum` | `team` | Default room mode (`team` or `classroom`). |
+| `coderooms.debugLogging` | `boolean` | `false` | Enable verbose logging in the developer console. |
+
+---
+
+## Commands
+
+| Command | Description | Who |
+|---------|-------------|-----|
+| Start Room as Root | Create a new room as the owner | Anyone |
+| Join Room | Join an existing room by ID | Anyone |
+| Leave Room | Leave the current room | Anyone |
+| Copy Room ID | Copy the current room ID to clipboard | Anyone |
+| Reconnect | Force reconnect to the server | Anyone |
+| Share Current File | Share the active editor document | Root |
+| Stop Sharing Current File | Unshare the active document | Root |
+| Open Shared Document | Switch to a shared document | Anyone in room |
+| Export Room | Download all shared docs as a zip | Root |
+| Stop Room | Close the room for everyone | Root |
+| Toggle Collaborator Mode | Switch between direct edit and suggestion mode | Collaborator |
+| Toggle Follow Root | Follow or unfollow the root's cursor | Collaborator/Viewer |
+| Change Participant Role | Change a participant's role | Root |
+| Set Role → Root / Collaborator / Viewer | Quick role assignment from context menu | Root |
+| Remove Participant | Kick a participant from the room | Root |
+| Accept / Reject Suggestion | Act on a pending suggestion | Root |
+| Generate Invite Token | Create a single-use join token | Root |
+| Open Chat / Send Chat Message | Chat with room participants | Anyone in room |
+
+---
+
+## Server Configuration
+
+The server accepts configuration through CLI flags, environment variables, or a `coderooms.config.json` file:
+
+| Option | CLI Flag | Env Variable | Default |
+|--------|----------|-------------|---------|
+| Port | `--port`, `-p` | `CODEROOMS_PORT` | `5171` |
+| Host | `--host`, `-h` | `CODEROOMS_HOST` | `127.0.0.1` |
+| TLS Cert | `--cert` | `CODEROOMS_CERT` | *(none)* |
+| TLS Key | `--key` | `CODEROOMS_KEY` | *(none)* |
+
+Resolution order: CLI → environment variable → config file → default.
+
+---
+
+## Security
+
+- Room secrets hashed with **PBKDF2** (100 000 iterations, SHA-512).
+- Chat is **E2E encrypted** (AES-256-GCM) when a room secret is set; document content is transmitted in plaintext.
+- Per-IP limits: max 20 connections, 10 rooms, rate-limited joins/chat/suggestions.
+- Display names capped at 50 characters; message payloads capped at 512 KB.
+- No built-in TLS — run behind a reverse proxy (nginx, Caddy) for production use.
+- Room state persisted via atomic JSON backups; auto-restored on restart.
+
+---
+
+## Project Structure
+
+```
+CodeRooms/
+├── src/                    # Extension source (TypeScript)
+│   ├── extension.ts        # Activation, commands, message handling
+│   ├── connection/         # WebSocket client + message types
+│   ├── core/               # DocumentSync, RoomState, ChatManager, etc.
+│   ├── ui/                 # ChatView, ParticipantsView, StatusBar
+│   └── util/               # Config, logger, crypto helpers
+├── server/                 # Coordination server (TypeScript)
+│   ├── server.ts           # WebSocket server, room logic, persistence
+│   ├── patch.ts            # Text patch application
+│   ├── ot.ts               # Operational Transform engine
+│   ├── rateLimiter.ts      # Token-bucket rate limiter
+│   └── types.ts            # Re-exports shared protocol types
+├── shared/                 # Shared type definitions
+│   └── protocol.ts         # Single source of truth for message types
+├── tests/                  # Vitest test suite
+├── media/                  # Icons and assets
+├── out/                    # Compiled extension output
+└── out-server/             # Compiled server output
+```
+
+---
+
+## Development
+
+```bash
+npm run compile          # Compile the extension
+npm run typecheck        # Type-check without emitting
+npm run bundle           # Bundle with esbuild for packaging
+npm run server:build     # Compile the server
+npm test                 # Run all tests (vitest)
+npm run package          # Package as .vsix
+```
+
+---
+
+## License
+
+[MIT](LICENSE)

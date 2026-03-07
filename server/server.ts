@@ -18,11 +18,14 @@ import {
 } from './types';
 import { log } from './logger';
 import { applyPatch, applyPatches } from './patch';
+import { transformPatch, VersionedPatch } from './ot';
 import { RateLimiter } from './rateLimiter';
 import path from 'path';
 import { pack, unpack } from 'msgpackr';
 
 type ParticipantState = Participant & { isDirectEditMode?: boolean };
+
+const MAX_PATCH_HISTORY = 200;
 
 interface DocumentState {
   docId: string;
@@ -31,6 +34,7 @@ interface DocumentState {
   originalUri: string;
   fileName: string;
   languageId: string;
+  patchHistory: VersionedPatch[];
 }
 
 interface ConnectionContext {
@@ -68,9 +72,14 @@ const MAX_MESSAGE_BYTES = 512 * 1024; // 512 KB hard limit per message
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024; // 2 MB limit for shared documents
 const MAX_ROOMS_GLOBAL = 500;
 const MAX_ROOMS_PER_IP = 10;
+const MAX_CONNECTIONS_PER_IP = 20;
+const MAX_DISPLAY_NAME_LENGTH = 50;
 const MAX_DOCUMENTS_PER_ROOM = 50;
 const MAX_SUGGESTIONS_PER_ROOM = 100;
+const MAX_TOTAL_DOC_BYTES = 256 * 1024 * 1024; // 256 MB total memory budget for document text
+let totalDocBytes = 0;
 const roomCountByIp = new Map<string, number>();
+const connectionsPerIp = new Map<string, number>();
 const pendingAsyncOps = new Set<string>(); // tracks connections in async createRoom/joinRoom
 
 // Ensure backup directory exists
@@ -127,12 +136,17 @@ function loadRooms(): void {
       const data = JSON.parse(raw);
       for (const roomId in data) {
         const d = data[roomId];
+        const restoredDocs = new Map<string, DocumentState>(d.documents);
+        // Initialize patchHistory for restored documents (ephemeral, not persisted)
+        for (const [, doc] of restoredDocs) {
+          (doc as DocumentState).patchHistory = [];
+        }
         rooms.set(roomId, {
           roomId: d.roomId,
           ownerId: d.ownerId,
           participants: new Map(d.participants),
           connections: new Map(),
-          documents: new Map(d.documents),
+          documents: restoredDocs,
           suggestions: new Map(d.suggestions),
           mode: d.mode,
           secretHash: d.secretHash,
@@ -250,6 +264,15 @@ setInterval(() => {
 
 wss.on('connection', (ws, request) => {
   const ip = request.socket.remoteAddress ?? 'unknown';
+
+  // Per-IP connection limit
+  const ipConns = connectionsPerIp.get(ip) ?? 0;
+  if (ipConns >= MAX_CONNECTIONS_PER_IP) {
+    ws.close(1008, 'Too many connections from this IP');
+    return;
+  }
+  connectionsPerIp.set(ip, ipConns + 1);
+
   const context: ConnectionContext = { ws, userId: uuidv4(), ip };
 
   ws.on('message', payload => {
@@ -279,6 +302,10 @@ wss.on('connection', (ws, request) => {
   });
 
   ws.on('close', () => {
+    // Decrement per-IP connection counter
+    const conns = connectionsPerIp.get(ip) ?? 1;
+    if (conns <= 1) { connectionsPerIp.delete(ip); }
+    else { connectionsPerIp.set(ip, conns - 1); }
     cleanupConnection(context);
   });
 
@@ -306,9 +333,9 @@ function validateMessage(msg: unknown): msg is ClientToServerMessage {
 
   switch (m.type) {
     case 'createRoom':
-      return str(m.displayName) && optStr(m.mode) && optStr(m.secret);
+      return str(m.displayName) && (m.displayName as string).length <= MAX_DISPLAY_NAME_LENGTH && optStr(m.mode) && optStr(m.secret);
     case 'joinRoom':
-      return str(m.roomId) && str(m.displayName) && optStr(m.secret) && optStr(m.token);
+      return str(m.roomId) && str(m.displayName) && (m.displayName as string).length <= MAX_DISPLAY_NAME_LENGTH && optStr(m.secret) && optStr(m.token);
     case 'leaveRoom':
       return true;
     case 'updateRole':
@@ -576,6 +603,11 @@ function cleanupConnection(context: ConnectionContext): void {
 function deleteRoom(roomId: string): void {
   const room = rooms.get(roomId);
   if (!room) { return; }
+  // Reclaim memory budget for all documents in this room
+  for (const doc of room.documents.values()) {
+    totalDocBytes -= Buffer.byteLength(doc.text, 'utf8');
+  }
+  if (totalDocBytes < 0) { totalDocBytes = 0; }
   // Decrement per-IP room counter using the owner's connection IP
   const ownerCtx = room.connections.get(room.ownerId);
   if (ownerCtx?.ip) {
@@ -674,13 +706,23 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
     return;
   }
 
+  const textBytes = Buffer.byteLength(message.text, 'utf8');
+  const existing = room.documents.get(message.docId);
+  const oldBytes = existing ? Buffer.byteLength(existing.text, 'utf8') : 0;
+  if (totalDocBytes - oldBytes + textBytes > MAX_TOTAL_DOC_BYTES) {
+    sendError(context.ws, 'Server memory limit reached. Cannot share more documents.', 'MEMORY_LIMIT');
+    return;
+  }
+  totalDocBytes += textBytes - oldBytes;
+
   const doc: DocumentState = {
     docId: message.docId,
     text: message.text,
     version: message.version,
     originalUri: message.originalUri,
     fileName: message.fileName,
-    languageId: message.languageId
+    languageId: message.languageId,
+    patchHistory: []
   };
 
   room.documents.set(message.docId, doc);
@@ -708,6 +750,7 @@ function handleUnshareDocument(context: ConnectionContext, documentId: string): 
   if (!removed) {
     return;
   }
+  totalDocBytes -= Buffer.byteLength(removed.text, 'utf8');
   room.documents.delete(documentId);
   broadcast(room, { type: 'documentUnshared', roomId: room.roomId, documentId }, context.ws);
   log('doc_unshared', { roomId: room.roomId, docId: documentId, ownerId: room.ownerId });
@@ -737,21 +780,54 @@ function handleDocChange(context: ConnectionContext, message: Extract<ClientToSe
     return;
   }
 
-  const updatedText = applyPatch(doc.text, message.patch);
+  // OT: if the client's version is behind, transform the patch against
+  // all patches applied since the client's base version.
+  let patchToApply = message.patch;
+  if (message.version <= doc.version && doc.patchHistory.length > 0) {
+    const transformed = transformPatch(
+      doc.text,
+      message.patch,
+      message.version - 1, // client authored against version-1
+      doc.patchHistory,
+    );
+    if (!transformed) {
+      // Patch fully subsumed by concurrent edits — silently drop
+      return;
+    }
+    patchToApply = transformed;
+  }
+
+  const baseText = doc.text;
+  const updatedText = applyPatch(doc.text, patchToApply);
   if (!updatedText) {
     sendError(context.ws, 'Invalid patch payload', 'PATCH_INVALID');
     return;
   }
 
+  totalDocBytes += Buffer.byteLength(updatedText, 'utf8') - Buffer.byteLength(baseText, 'utf8');
+  doc.version += 1;
+  const newVersion = doc.version;
+
+  // Record in history for future OT transforms
+  doc.patchHistory.push({
+    patch: patchToApply,
+    authorId: context.userId,
+    version: newVersion,
+    baseText,
+  });
+  // Trim history to bounded size
+  if (doc.patchHistory.length > MAX_PATCH_HISTORY) {
+    doc.patchHistory.splice(0, doc.patchHistory.length - MAX_PATCH_HISTORY);
+  }
+
   doc.text = updatedText;
-  doc.version = message.version;
   room.documents.set(message.docId, doc);
 
   broadcast(room, {
     type: 'docChangeBroadcast',
     docId: message.docId,
-    version: doc.version,
-    patch: message.patch,
+    version: newVersion,
+    patch: patchToApply,
     authorId: context.userId
   }, context.ws);
 }
@@ -886,8 +962,10 @@ function handleFullDocumentSync(
   if (!doc) {
     return;
   }
+  totalDocBytes += Buffer.byteLength(message.text, 'utf8') - Buffer.byteLength(doc.text, 'utf8');
   doc.text = message.text;
   doc.version = message.version;
+  doc.patchHistory = []; // reset history on full sync
   room.documents.set(message.docId, doc);
 
   broadcast(room, {

@@ -308,6 +308,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   webSocket.on('reconnectFailed', () => {
     statusBar.setConnectionState('error', 'Could not reconnect after multiple attempts');
+    resetState();
     void vscode.window.showErrorMessage(
       'CodeRooms: unable to reconnect to the server after multiple attempts.',
       'Retry'
@@ -320,8 +321,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
   webSocket.on('close', () => {
     isConnected = false;
-    statusBar.setConnectionState('disconnected', 'Connection closed');
-    resetState();
+    if (webSocket.isAutoReconnecting()) {
+      // Preserve room/document/chat state during reconnect window
+      statusBar.setConnectionState('reconnecting', 'Connection lost, reconnecting...');
+      cursorManager.clearAll();
+    } else {
+      statusBar.setConnectionState('disconnected', 'Connection closed');
+      resetState();
+    }
   });
 
   function resetState(): void {
