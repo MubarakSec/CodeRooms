@@ -39,6 +39,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let connectionPromise: Promise<void> | undefined;
   const pendingOffline: ClientToServerMessage[] = [];
   const pendingAck = new Map<string, ClientToServerMessage>();
+  const MAX_PENDING_ACK = 200;
   const pendingRoleUpdates = new Map<string, NodeJS.Timeout>();
   let lastRootCursorMessage: Extract<ServerToClientMessage, { type: 'rootCursor' }> | undefined;
   let e2eKey: Buffer | undefined;     // AES-256-GCM key derived from room secret — null when no secret
@@ -96,12 +97,21 @@ export function activate(context: vscode.ExtensionContext): void {
     if (isConnected) {
       const key = messageKey(message);
       if (key) {
+        if (pendingAck.size >= MAX_PENDING_ACK) {
+          // Evict the oldest entry to prevent unbounded growth
+          const first = pendingAck.keys().next().value;
+          if (first !== undefined) { pendingAck.delete(first); }
+        }
         pendingAck.set(key, message);
       }
       webSocket.send(message);
     } else {
       const key = messageKey(message);
       if (key) {
+        if (pendingAck.size >= MAX_PENDING_ACK) {
+          const first = pendingAck.keys().next().value;
+          if (first !== undefined) { pendingAck.delete(first); }
+        }
         pendingAck.set(key, message);
       }
       pendingOffline.push(message);
@@ -151,6 +161,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const chatView = new ChatView(chatManager);
   let lastJoinRoomId: string | undefined;
   let lastJoinDisplayName: string | undefined;
+  let lastJoinSecret: string | undefined; // preserved for auto-rejoin on reconnect
   let refreshTimer: NodeJS.Timeout | undefined;
 
   const followDisposable = followController.onDidChange(async () => {
@@ -286,7 +297,8 @@ export function activate(context: vscode.ExtensionContext): void {
     flushPending();
     // If we were in a room before disconnect, attempt to rejoin
     if (lastJoinRoomId && lastJoinDisplayName) {
-      webSocket.send({ type: 'joinRoom', roomId: lastJoinRoomId, displayName: lastJoinDisplayName });
+      pendingSecret = lastJoinSecret; // re-derive E2E key on rejoin
+      webSocket.send({ type: 'joinRoom', roomId: lastJoinRoomId, displayName: lastJoinDisplayName, secret: lastJoinSecret });
     }
   });
 
@@ -698,6 +710,7 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     const secret = secretInput?.trim() ? secretInput.trim() : undefined;
     pendingSecret = secret; // stored for E2E key derivation once roomId is known
+    lastJoinSecret = secret;
     webSocket.send({ type: 'createRoom', displayName, mode, secret });
   }
 
@@ -723,6 +736,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const secret = isToken ? undefined : (secretOrToken || undefined);
     const token = isToken ? secretOrToken : undefined;
     pendingSecret = secret; // only real passwords drive E2E; tokens don't carry a key
+    lastJoinSecret = secret;
     lastJoinRoomId = roomId.trim();
     lastJoinDisplayName = displayName;
     webSocket.send({ type: 'joinRoom', roomId: roomId.trim(), displayName, secret, token });
@@ -734,6 +748,9 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     webSocket.send({ type: 'leaveRoom' });
+    lastJoinRoomId = undefined;
+    lastJoinDisplayName = undefined;
+    lastJoinSecret = undefined;
     resetState();
   }
 
@@ -1126,6 +1143,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     pendingSecret = secret;
+    lastJoinSecret = secret;
     webSocket.send({ type: 'joinRoom', roomId: lastJoinRoomId, displayName: lastJoinDisplayName, secret, token });
   }
 

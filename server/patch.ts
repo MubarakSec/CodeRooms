@@ -19,12 +19,14 @@ export function applyPatch(text: string, patch: TextPatch): string | undefined {
  * If validation fails, undefined is returned.
  */
 export function applyPatches(text: string, patches: TextPatch[]): string | undefined {
-  const normalized = normalizePatches(text, patches);
+  // Normalize CRLF to LF so offsets computed from Position are consistent
+  const normalizedText = text.replace(/\r\n/g, '\n');
+  const normalized = normalizePatches(normalizedText, patches);
   if (!normalized) {
     return undefined;
   }
 
-  let output = text;
+  let output = normalizedText;
   for (const patch of normalized) {
     output = `${output.slice(0, patch.start)}${patch.text}${output.slice(patch.end)}`;
   }
@@ -60,7 +62,9 @@ function offsetFromPosition(text: string, position: { line: number; character: n
   if (position.line < 0 || position.character < 0) {
     return undefined;
   }
-  const lines = text.split('\n');
+  // Normalize CRLF to LF before splitting to handle Windows line endings
+  const normalized = text.replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
   if (position.line >= lines.length) {
     return undefined;
   }

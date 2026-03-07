@@ -4,6 +4,19 @@
     "description": "Real-time collaborative coding inside VSCode with role-based rooms.",
     "version": "0.1.0",
     "publisher": "mobta",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/mobta/CodeRooms"
+    },
+    "icon": "media/icon.png",
+    "keywords": [
+        "collaboration",
+        "real-time",
+        "pair-programming",
+        "rooms",
+        "live-share"
+    ],
     "engines": {
         "vscode": "^1.80.0"
     },

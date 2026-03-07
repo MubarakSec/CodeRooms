@@ -138,7 +138,9 @@ export class RoomStorage {
   }
 
   private async ensureRoomFolders(roomId: string): Promise<string> {
-    const roomFolder = path.join(this.roomsRoot, roomId);
+    // Sanitize roomId to prevent directory traversal
+    const safeRoomId = path.basename(roomId);
+    const roomFolder = path.join(this.roomsRoot, safeRoomId);
     await this.ensureDir(roomFolder);
     return roomFolder;
   }
@@ -164,8 +166,10 @@ export class RoomStorage {
   }
 
   private async resolveFileName(folder: string, fileName: string): Promise<string> {
-    const parsed = path.parse(fileName);
-    let candidate = fileName || 'shared-file.txt';
+    // Sanitize: strip directory traversal and path separators, keep only the base name
+    const sanitized = path.basename(fileName).replace(/\.\./g, '');
+    const parsed = path.parse(sanitized);
+    let candidate = sanitized || 'shared-file.txt';
     let suffix = 2;
 
     while (await this.exists(path.join(folder, candidate))) {

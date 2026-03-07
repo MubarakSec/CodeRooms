@@ -1,5 +1,10 @@
-import { createHash, randomBytes, pbkdf2Sync, timingSafeEqual } from 'crypto';
+import { randomBytes, pbkdf2, timingSafeEqual } from 'crypto';
+import { promisify } from 'util';
+
+const pbkdf2Async = promisify(pbkdf2);
 import fs from 'fs';
+import { promises as fsp } from 'fs';
+import https from 'https';
 import minimist from 'minimist';
 import { v4 as uuidv4 } from 'uuid';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -51,18 +56,29 @@ interface RoomState {
 
 const rooms = new Map<string, RoomState>();
 const joinLimiter = new RateLimiter(60_000, 20, 3 * 60_000);
+// Per-user rate limiters for chat and suggestions (10 messages per 10s, block 30s)
+const chatLimiter = new RateLimiter(10_000, 10, 30_000);
+const suggestionLimiter = new RateLimiter(30_000, 5, 60_000);
 const MAX_CHAT_MESSAGES = 500;
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const inviteTokens = new Map<string, { roomId: string; label?: string; createdAt: number }>();
 const BACKUP_DIR = path.join(__dirname, '..', 'backups');
 const BACKUP_FILE = path.join(BACKUP_DIR, 'rooms-backup.json');
+const MAX_MESSAGE_BYTES = 512 * 1024; // 512 KB hard limit per message
+const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024; // 2 MB limit for shared documents
+const MAX_ROOMS_GLOBAL = 500;
+const MAX_ROOMS_PER_IP = 10;
+const MAX_DOCUMENTS_PER_ROOM = 50;
+const MAX_SUGGESTIONS_PER_ROOM = 100;
+const roomCountByIp = new Map<string, number>();
+const pendingAsyncOps = new Set<string>(); // tracks connections in async createRoom/joinRoom
 
 // Ensure backup directory exists
 if (!fs.existsSync(BACKUP_DIR)) {
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
 }
 
-function saveRooms(): void {
+async function saveRooms(): Promise<void> {
   const data: Record<string, any> = {};
   for (const [roomId, room] of rooms.entries()) {
     data[roomId] = {
@@ -79,24 +95,24 @@ function saveRooms(): void {
   
   // Atomic write: write to temp file first, then rename to prevent corruption on crash
   const tmpFile = BACKUP_FILE + '.tmp';
-  fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2));
-  fs.renameSync(tmpFile, BACKUP_FILE);
+  await fsp.writeFile(tmpFile, JSON.stringify(data, null, 2));
+  await fsp.rename(tmpFile, BACKUP_FILE);
   
   // Create timestamped backup (keep last 10)
   const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
   const archivedFile = path.join(BACKUP_DIR, `rooms-${timestamp}.json`);
-  fs.writeFileSync(archivedFile, JSON.stringify(data, null, 2));
+  await fsp.writeFile(archivedFile, JSON.stringify(data, null, 2));
   
   // Cleanup old backups (keep last 10)
   try {
-    const files = fs.readdirSync(BACKUP_DIR)
+    const files = (await fsp.readdir(BACKUP_DIR))
       .filter(f => f.startsWith('rooms-') && f.endsWith('.json') && f !== 'rooms-backup.json')
       .sort()
       .reverse();
     
     if (files.length > 10) {
       for (let i = 10; i < files.length; i++) {
-        fs.unlinkSync(path.join(BACKUP_DIR, files[i]));
+        await fsp.unlink(path.join(BACKUP_DIR, files[i]));
       }
     }
   } catch (e) {
@@ -134,16 +150,31 @@ function loadRooms(): void {
 
 const args = minimist(process.argv.slice(2), {
   alias: { p: 'port', h: 'host' },
-  string: ['port', 'host']
+  string: ['port', 'host', 'cert', 'key']
 });
 const fileConfig = loadConfig();
 const port = Number(args.port ?? process.env.CODEROOMS_PORT ?? fileConfig.port ?? 5171);
 const host = (args.host ?? process.env.CODEROOMS_HOST ?? fileConfig.host ?? '127.0.0.1') as string;
 
-const wss = new WebSocketServer({ port, host });
+// TLS support: provide --cert and --key to enable WSS
+const certPath = args.cert ?? process.env.CODEROOMS_CERT ?? fileConfig.cert;
+const keyPath = args.key ?? process.env.CODEROOMS_KEY ?? fileConfig.key;
 
-log('server_listening', { host, port });
-console.log(`CodeRooms server listening on ws://${host}:${port}`);
+let wss: WebSocketServer;
+if (certPath && keyPath) {
+  const httpsServer = https.createServer({
+    cert: fs.readFileSync(certPath),
+    key: fs.readFileSync(keyPath)
+  });
+  wss = new WebSocketServer({ server: httpsServer, maxPayload: MAX_MESSAGE_BYTES });
+  httpsServer.listen(port, host);
+  log('server_listening', { host, port, tls: true });
+  console.log(`CodeRooms server listening on wss://${host}:${port}`);
+} else {
+  wss = new WebSocketServer({ port, host, maxPayload: MAX_MESSAGE_BYTES });
+  log('server_listening', { host, port, tls: false });
+  console.log(`CodeRooms server listening on ws://${host}:${port}`);
+}
 
 // Load rooms from backup on startup
 loadRooms();
@@ -151,20 +182,39 @@ loadRooms();
 // Auto-save rooms every 30 seconds
 setInterval(() => {
   if (rooms.size > 0) {
-    saveRooms();
+    void saveRooms();
   }
 }, 30_000);
 
-// Save rooms on shutdown
+// Save rooms on shutdown (sync fallback for process exit)
+function saveRoomsSync(): void {
+  const data: Record<string, any> = {};
+  for (const [roomId, room] of rooms.entries()) {
+    data[roomId] = {
+      roomId: room.roomId,
+      ownerId: room.ownerId,
+      participants: Array.from(room.participants.entries()),
+      documents: Array.from(room.documents.entries()),
+      suggestions: Array.from(room.suggestions.entries()),
+      mode: room.mode,
+      secretHash: room.secretHash,
+      chat: room.chat
+    };
+  }
+  const tmpFile = BACKUP_FILE + '.tmp';
+  fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2));
+  fs.renameSync(tmpFile, BACKUP_FILE);
+}
+
 process.on('SIGTERM', () => {
   log('server_shutdown', { reason: 'SIGTERM' });
-  saveRooms();
+  saveRoomsSync();
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
   log('server_shutdown', { reason: 'SIGINT' });
-  saveRooms();
+  saveRoomsSync();
   process.exit(0);
 });
 
@@ -178,8 +228,7 @@ setInterval(() => {
     if (room.connections.size === 0) {
       const lastActive = roomLastActivity.get(roomId) ?? now;
       if (now - lastActive > IDLE_ROOM_TIMEOUT_MS) {
-        rooms.delete(roomId);
-        roomLastActivity.delete(roomId);
+        deleteRoom(roomId);
         log('room_idle_cleanup', { roomId });
       }
     } else {
@@ -192,10 +241,12 @@ setInterval(() => {
       inviteTokens.delete(token);
     }
   }
+  // Clean up stale rate limiter buckets
+  joinLimiter.cleanup();
+  chatLimiter.cleanup();
+  suggestionLimiter.cleanup();
 }, 5 * 60 * 1000);
 
-const MAX_MESSAGE_BYTES = 512 * 1024; // 512 KB hard limit per message
-const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024; // 2 MB limit for shared documents
 
 wss.on('connection', (ws, request) => {
   const ip = request.socket.remoteAddress ?? 'unknown';
@@ -243,13 +294,68 @@ wss.on('connection', (ws, request) => {
   ws.on('close', () => clearInterval(pingTimer));
 });
 
+/** Validates that a client message has the required shape before processing. */
+function validateMessage(msg: unknown): msg is ClientToServerMessage {
+  if (typeof msg !== 'object' || msg === null || !('type' in msg)) {
+    return false;
+  }
+  const m = msg as Record<string, unknown>;
+  const str = (v: unknown): v is string => typeof v === 'string';
+  const num = (v: unknown): v is number => typeof v === 'number';
+  const optStr = (v: unknown): boolean => v === undefined || str(v);
+
+  switch (m.type) {
+    case 'createRoom':
+      return str(m.displayName) && optStr(m.mode) && optStr(m.secret);
+    case 'joinRoom':
+      return str(m.roomId) && str(m.displayName) && optStr(m.secret) && optStr(m.token);
+    case 'leaveRoom':
+      return true;
+    case 'updateRole':
+      return str(m.userId) && str(m.role);
+    case 'shareDocument':
+      return str(m.roomId) && str(m.docId) && str(m.originalUri) && str(m.fileName) && str(m.languageId) && str(m.text) && num(m.version);
+    case 'unshareDocument':
+      return str(m.roomId) && str(m.documentId);
+    case 'docChange':
+      return str(m.roomId) && str(m.docId) && num(m.version) && typeof m.patch === 'object' && m.patch !== null;
+    case 'suggestion':
+      return str(m.roomId) && str(m.docId) && str(m.suggestionId) && Array.isArray(m.patches) && str(m.authorId) && str(m.authorName) && num(m.createdAt);
+    case 'acceptSuggestion':
+    case 'rejectSuggestion':
+      return str(m.roomId) && str(m.suggestionId);
+    case 'setEditMode':
+      return str(m.userId) && typeof m.direct === 'boolean';
+    case 'requestFullSync':
+      return str(m.roomId) && str(m.docId);
+    case 'fullDocumentSync':
+      return str(m.roomId) && str(m.docId) && str(m.text) && num(m.version);
+    case 'rootCursor':
+    case 'cursorUpdate':
+      return str(m.roomId) && str(m.docId) && str(m.uri) && typeof m.position === 'object' && m.position !== null;
+    case 'participantActivity':
+      return str(m.roomId) && str(m.userId) && str(m.activity) && num(m.at);
+    case 'chatSend':
+      return str(m.roomId) && str(m.messageId) && str(m.content) && num(m.timestamp);
+    case 'createToken':
+      return optStr(m.label);
+    default:
+      return false;
+  }
+}
+
 function handleMessage(context: ConnectionContext, message: ClientToServerMessage): void {
+  if (!validateMessage(message)) {
+    sendError(context.ws, 'Invalid message format', 'PAYLOAD_INVALID');
+    return;
+  }
+
   switch (message.type) {
     case 'createRoom':
-      createRoom(context, message.displayName, message.mode, message.secret);
+      void createRoom(context, message.displayName, message.mode, message.secret);
       break;
     case 'joinRoom':
-      joinRoom(context, message.roomId, message.displayName, message.secret, message.token);
+      void joinRoom(context, message.roomId, message.displayName, message.secret, message.token);
       break;
     case 'leaveRoom':
       cleanupRoomMembership(context);
@@ -312,7 +418,32 @@ type RoomChatMessage = {
   isSystem?: boolean;
 };
 
-function createRoom(context: ConnectionContext, displayName: string, mode: RoomMode = 'team', secret?: string): void {
+async function createRoom(context: ConnectionContext, displayName: string, mode: RoomMode = 'team', secret?: string): Promise<void> {
+  if (pendingAsyncOps.has(context.userId)) {
+    sendError(context.ws, 'Please wait for your previous request to complete.', 'BUSY');
+    return;
+  }
+  pendingAsyncOps.add(context.userId);
+  try {
+    await createRoomInner(context, displayName, mode, secret);
+  } finally {
+    pendingAsyncOps.delete(context.userId);
+  }
+}
+
+async function createRoomInner(context: ConnectionContext, displayName: string, mode: RoomMode = 'team', secret?: string): Promise<void> {
+  // Enforce global and per-IP room limits
+  if (rooms.size >= MAX_ROOMS_GLOBAL) {
+    sendError(context.ws, 'Server room limit reached. Try again later.', 'ROOM_LIMIT');
+    return;
+  }
+  const ipKey = context.ip ?? 'unknown';
+  const ipRoomCount = roomCountByIp.get(ipKey) ?? 0;
+  if (ipRoomCount >= MAX_ROOMS_PER_IP) {
+    sendError(context.ws, 'You have too many active rooms.', 'ROOM_LIMIT');
+    return;
+  }
+
   const roomId = generateRoomId();
   const room: RoomState = {
     roomId,
@@ -322,11 +453,12 @@ function createRoom(context: ConnectionContext, displayName: string, mode: RoomM
     documents: new Map(),
     suggestions: new Map(),
     mode: mode ?? 'team',
-    secretHash: secret ? hashSecret(secret, roomId) : undefined,
+    secretHash: secret ? await hashSecret(secret, roomId) : undefined,
     chat: []
   };
 
   rooms.set(roomId, room);
+  roomCountByIp.set(ipKey, ipRoomCount + 1);
   context.roomId = roomId;
   context.role = 'root';
   context.displayName = displayName;
@@ -353,7 +485,20 @@ function createRoom(context: ConnectionContext, displayName: string, mode: RoomM
   log('room_created', { roomId, ownerId: context.userId, mode: room.mode, hasSecret: Boolean(room.secretHash) });
 }
 
-function joinRoom(context: ConnectionContext, roomId: string, displayName: string, secret?: string, token?: string): void {
+async function joinRoom(context: ConnectionContext, roomId: string, displayName: string, secret?: string, token?: string): Promise<void> {
+  if (pendingAsyncOps.has(context.userId)) {
+    sendError(context.ws, 'Please wait for your previous request to complete.', 'BUSY');
+    return;
+  }
+  pendingAsyncOps.add(context.userId);
+  try {
+    await joinRoomInner(context, roomId, displayName, secret, token);
+  } finally {
+    pendingAsyncOps.delete(context.userId);
+  }
+}
+
+async function joinRoomInner(context: ConnectionContext, roomId: string, displayName: string, secret?: string, token?: string): Promise<void> {
   if (isJoinBlocked(context)) {
     return;
   }
@@ -383,7 +528,7 @@ function joinRoom(context: ConnectionContext, roomId: string, displayName: strin
       sendError(context.ws, 'Room requires a secret', 'ROOM_SECRET_REQUIRED');
       return;
     }
-    if (!verifySecret(secret, roomId, room.secretHash)) {
+    if (!await verifySecret(secret, roomId, room.secretHash)) {
       recordFailedJoin(context);
       sendError(context.ws, 'Room secret is invalid', 'ROOM_SECRET_INVALID');
       return;
@@ -428,6 +573,20 @@ function cleanupConnection(context: ConnectionContext): void {
   cleanupRoomMembership(context);
 }
 
+function deleteRoom(roomId: string): void {
+  const room = rooms.get(roomId);
+  if (!room) { return; }
+  // Decrement per-IP room counter using the owner's connection IP
+  const ownerCtx = room.connections.get(room.ownerId);
+  if (ownerCtx?.ip) {
+    const count = roomCountByIp.get(ownerCtx.ip) ?? 1;
+    if (count <= 1) { roomCountByIp.delete(ownerCtx.ip); }
+    else { roomCountByIp.set(ownerCtx.ip, count - 1); }
+  }
+  rooms.delete(roomId);
+  roomLastActivity.delete(roomId);
+}
+
 function cleanupRoomMembership(context: ConnectionContext): void {
   if (!context.roomId) {
     return;
@@ -448,7 +607,7 @@ function cleanupRoomMembership(context: ConnectionContext): void {
       send(connection.ws, { type: 'error', message: 'Room closed by root user.' });
       connection.ws.close();
     }
-    rooms.delete(room.roomId);
+    deleteRoom(room.roomId);
     log('room_closed', { roomId: room.roomId });
   }
 
@@ -507,6 +666,11 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
 
   if (Buffer.byteLength(message.text, 'utf8') > MAX_DOCUMENT_BYTES) {
     sendError(context.ws, 'Document is too large to share (max 2 MB).', 'DOCUMENT_TOO_LARGE');
+    return;
+  }
+
+  if (!room.documents.has(message.docId) && room.documents.size >= MAX_DOCUMENTS_PER_ROOM) {
+    sendError(context.ws, `Room document limit reached (max ${MAX_DOCUMENTS_PER_ROOM}).`, 'DOCUMENT_LIMIT');
     return;
   }
 
@@ -598,6 +762,18 @@ function handleSuggestion(
 ): void {
   const room = getRoomForContext(context);
   if (!room) {
+    return;
+  }
+
+  const suggestKey = context.ip ?? context.userId;
+  if (suggestionLimiter.isBlocked(suggestKey)) {
+    sendError(context.ws, 'Too many suggestions. Please wait.', 'RATE_LIMITED');
+    return;
+  }
+  suggestionLimiter.recordFailure(suggestKey);
+
+  if (room.suggestions.size >= MAX_SUGGESTIONS_PER_ROOM) {
+    sendError(context.ws, `Suggestion limit reached (max ${MAX_SUGGESTIONS_PER_ROOM}).`, 'SUGGESTION_LIMIT');
     return;
   }
 
@@ -775,6 +951,13 @@ function handleChatSend(context: ConnectionContext, message: Extract<ClientToSer
     return;
   }
 
+  const chatKey = context.ip ?? context.userId;
+  if (chatLimiter.isBlocked(chatKey)) {
+    sendError(context.ws, 'You are sending messages too fast. Please wait.', 'RATE_LIMITED');
+    return;
+  }
+  chatLimiter.recordFailure(chatKey);
+
   const trimmed = message.content.trim();
   if (!trimmed) {
     return;
@@ -836,6 +1019,9 @@ function broadcast(room: RoomState, message: ServerToClientMessage, except?: Web
 }
 
 function send(ws: WebSocket, message: ServerToClientMessage): void {
+  if (ws.readyState !== WebSocket.OPEN) {
+    return;
+  }
   ws.send(pack(message));
 }
 
@@ -878,17 +1064,17 @@ function generateRoomId(): string {
   return code;
 }
 
-function hashSecret(secret: string, salt: string): string {
-  return 'pbkdf2:' + pbkdf2Sync(secret, salt, 100_000, 32, 'sha256').toString('hex');
+async function hashSecret(secret: string, salt: string): Promise<string> {
+  const derived = await pbkdf2Async(secret, salt, 100_000, 32, 'sha256');
+  return 'pbkdf2:' + derived.toString('hex');
 }
 
-function verifySecret(secret: string, roomId: string, storedHash: string): boolean {
+async function verifySecret(secret: string, roomId: string, storedHash: string): Promise<boolean> {
   if (!storedHash.startsWith('pbkdf2:')) {
-    // Legacy rooms: plain SHA-256, no salt — allow during transition
-    const legacy = createHash('sha256').update(secret).digest('hex');
-    return legacy === storedHash;
+    // Legacy rooms cannot be verified safely — reject and require re-creation
+    return false;
   }
-  const newHash = Buffer.from(hashSecret(secret, roomId).slice('pbkdf2:'.length), 'hex');
+  const newHash = Buffer.from((await hashSecret(secret, roomId)).slice('pbkdf2:'.length), 'hex');
   const stored = Buffer.from(storedHash.slice('pbkdf2:'.length), 'hex');
   return newHash.length === stored.length && timingSafeEqual(newHash, stored);
 }
@@ -919,14 +1105,14 @@ function resetFailedJoin(context: ConnectionContext): void {
   joinLimiter.reset(key);
 }
 
-function loadConfig(): { host?: string; port?: number } {
+function loadConfig(): { host?: string; port?: number; cert?: string; key?: string } {
   try {
     const path = `${process.cwd()}/coderooms.config.json`;
     if (!fs.existsSync(path)) {
       return {};
     }
     const raw = fs.readFileSync(path, 'utf-8');
-    const parsed = JSON.parse(raw) as { host?: string; port?: number };
+    const parsed = JSON.parse(raw) as { host?: string; port?: number; cert?: string; key?: string };
     return parsed ?? {};
   } catch (error) {
     log('config_error', { error: error instanceof Error ? error.message : String(error) });

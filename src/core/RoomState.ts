@@ -43,7 +43,6 @@ export class RoomState {
       if (!activeIds.has(userId)) {
         this.participantActivity.delete(userId);
         this.participantFiles.delete(userId);
-    this.participantFiles.delete(userId);
       }
     }
     this.syncCollaboratorMode();
@@ -63,7 +62,6 @@ export class RoomState {
       this.collaboratorDirectMode = false;
     }
     this.participantActivity.delete(userId);
-        this.participantFiles.delete(userId);
     this.participantFiles.delete(userId);
   }
 

@@ -110,14 +110,22 @@ export class CursorManager {
       // Set new decorations
       for (const { userId, cursor } of editorCursors) {
         const dt = this.getDecorationType(userId);
-        const cursorPosition = new vscode.Position(cursor.position.line, cursor.position.character);
+        const lastLine = editor.document.lineCount - 1;
+        const clampedLine = Math.max(0, Math.min(cursor.position.line, lastLine));
+        const maxChar = editor.document.lineAt(clampedLine).text.length;
+        const clampedChar = Math.max(0, Math.min(cursor.position.character, maxChar));
+        const cursorPosition = new vscode.Position(clampedLine, clampedChar);
         const cursorRange = new vscode.Range(cursorPosition, cursorPosition);
         editor.setDecorations(dt.cursor, [cursorRange]);
 
         if (cursor.selections && cursor.selections.length > 0) {
-          const selRanges = cursor.selections.map(sel => 
-            new vscode.Range(new vscode.Position(sel.start.line, sel.start.character), new vscode.Position(sel.end.line, sel.end.character))
-          );
+          const selRanges = cursor.selections.map(sel => {
+            const sLine = Math.max(0, Math.min(sel.start.line, lastLine));
+            const sChar = Math.max(0, Math.min(sel.start.character, editor.document.lineAt(sLine).text.length));
+            const eLine = Math.max(0, Math.min(sel.end.line, lastLine));
+            const eChar = Math.max(0, Math.min(sel.end.character, editor.document.lineAt(eLine).text.length));
+            return new vscode.Range(new vscode.Position(sLine, sChar), new vscode.Position(eLine, eChar));
+          });
           editor.setDecorations(dt.selection, selRanges);
         } else {
           editor.setDecorations(dt.selection, []);

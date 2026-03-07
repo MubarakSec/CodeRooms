@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import { ChatManager } from '../core/ChatManager';
 
 export class ChatView implements vscode.WebviewViewProvider {
@@ -41,12 +42,13 @@ export class ChatView implements vscode.WebviewViewProvider {
   }
 
   private renderHtml(): string {
-    const nonce = Math.random().toString(36).slice(2);
+    const nonce = crypto.randomBytes(16).toString('base64');
     return /* html */ `
 <!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data:;" />
     <style>
       :root {
         color-scheme: light dark;

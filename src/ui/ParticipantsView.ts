@@ -67,7 +67,7 @@ class ParticipantItem extends vscode.TreeItem {
     }
     this.description = descriptionParts.join(' · ');
 
-    const tooltipLines = [`**${participant.displayName}**`];
+    const tooltipLines = [`**${escapeMarkdown(participant.displayName)}**`];
     tooltipLines.push(`Role: ${roleBadge(participant.role)}`);
     if (modeDetail) {
       tooltipLines.push(`Edit mode: ${modeDetail}`);
@@ -134,7 +134,7 @@ class SuggestionItem extends vscode.TreeItem {
 
     const md = new vscode.MarkdownString();
     md.isTrusted = true;
-    md.appendMarkdown(`**Suggestion from ${suggestion.authorName}**\n\n`);
+    md.appendMarkdown(`**Suggestion from ${escapeMarkdown(suggestion.authorName)}**\n\n`);
     if (truncated) {
       md.appendCodeblock(truncated, 'text');
     }
@@ -156,6 +156,11 @@ function roleBadge(role?: Role): string {
     default:
       return 'GUEST';
   }
+}
+
+/** Escape characters that have special meaning in VS Code MarkdownString */
+function escapeMarkdown(text: string): string {
+  return text.replace(/[\\`*_{}\[\]()#+\-.!|~<>]/g, '\\$&');
 }
 
 function describeRange(suggestion: Suggestion): string {

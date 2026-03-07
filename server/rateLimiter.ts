@@ -44,6 +44,18 @@ export class RateLimiter {
     this.buckets.delete(key);
   }
 
+  /** Remove stale buckets that have no recent failures and are not blocked. */
+  cleanup(): void {
+    const now = Date.now();
+    for (const [key, bucket] of this.buckets) {
+      this.prune(bucket);
+      const isBlocked = bucket.blockedUntil !== undefined && bucket.blockedUntil > now;
+      if (bucket.failures.length === 0 && !isBlocked) {
+        this.buckets.delete(key);
+      }
+    }
+  }
+
   private prune(bucket: Bucket): void {
     const cutoff = Date.now() - this.windowMs;
     bucket.failures = bucket.failures.filter(ts => ts >= cutoff);
