@@ -34,6 +34,7 @@
         "onView:coderoomsParticipants",
         "onCommand:coderooms.reconnect",
         "onCommand:coderooms.focusChatInput",
+        "onCommand:coderooms.generateInviteToken",
         "onView:coderoomsChatView"
     ],
     "main": "./out/extension.js",
@@ -175,6 +176,10 @@
             {
                 "command": "coderooms.reconnect",
                 "title": "CodeRooms: Reconnect"
+            },
+            {
+                "command": "coderooms.generateInviteToken",
+                "title": "CodeRooms: Generate Invite Token"
             },
             {
                 "command": "coderooms.ownerActionInfo",

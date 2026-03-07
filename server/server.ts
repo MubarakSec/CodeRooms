@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, pbkdf2Sync, timingSafeEqual } from 'crypto';
 import fs from 'fs';
 import minimist from 'minimist';
 import { v4 as uuidv4 } from 'uuid';
@@ -52,6 +52,8 @@ interface RoomState {
 const rooms = new Map<string, RoomState>();
 const joinLimiter = new RateLimiter(60_000, 20, 3 * 60_000);
 const MAX_CHAT_MESSAGES = 500;
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const inviteTokens = new Map<string, { roomId: string; label?: string; createdAt: number }>();
 const BACKUP_DIR = path.join(__dirname, '..', 'backups');
 const BACKUP_FILE = path.join(BACKUP_DIR, 'rooms-backup.json');
 
@@ -75,8 +77,10 @@ function saveRooms(): void {
     };
   }
   
-  // Write main backup
-  fs.writeFileSync(BACKUP_FILE, JSON.stringify(data, null, 2));
+  // Atomic write: write to temp file first, then rename to prevent corruption on crash
+  const tmpFile = BACKUP_FILE + '.tmp';
+  fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2));
+  fs.renameSync(tmpFile, BACKUP_FILE);
   
   // Create timestamped backup (keep last 10)
   const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
@@ -182,6 +186,12 @@ setInterval(() => {
       roomLastActivity.set(roomId, now);
     }
   }
+  // Clean up expired invite tokens
+  for (const [token, data] of inviteTokens) {
+    if (now - data.createdAt > TOKEN_TTL_MS) {
+      inviteTokens.delete(token);
+    }
+  }
 }, 5 * 60 * 1000);
 
 const MAX_MESSAGE_BYTES = 512 * 1024; // 512 KB hard limit per message
@@ -239,7 +249,7 @@ function handleMessage(context: ConnectionContext, message: ClientToServerMessag
       createRoom(context, message.displayName, message.mode, message.secret);
       break;
     case 'joinRoom':
-      joinRoom(context, message.roomId, message.displayName, message.secret);
+      joinRoom(context, message.roomId, message.displayName, message.secret, message.token);
       break;
     case 'leaveRoom':
       cleanupRoomMembership(context);
@@ -286,6 +296,9 @@ function handleMessage(context: ConnectionContext, message: ClientToServerMessag
     case 'chatSend':
       handleChatSend(context, message);
       break;
+    case 'createToken':
+      handleCreateToken(context, message.label);
+      break;
   }
 }
 
@@ -309,7 +322,7 @@ function createRoom(context: ConnectionContext, displayName: string, mode: RoomM
     documents: new Map(),
     suggestions: new Map(),
     mode: mode ?? 'team',
-    secretHash: secret ? hashSecret(secret) : undefined,
+    secretHash: secret ? hashSecret(secret, roomId) : undefined,
     chat: []
   };
 
@@ -340,7 +353,7 @@ function createRoom(context: ConnectionContext, displayName: string, mode: RoomM
   log('room_created', { roomId, ownerId: context.userId, mode: room.mode, hasSecret: Boolean(room.secretHash) });
 }
 
-function joinRoom(context: ConnectionContext, roomId: string, displayName: string, secret?: string): void {
+function joinRoom(context: ConnectionContext, roomId: string, displayName: string, secret?: string, token?: string): void {
   if (isJoinBlocked(context)) {
     return;
   }
@@ -351,13 +364,26 @@ function joinRoom(context: ConnectionContext, roomId: string, displayName: strin
     return;
   }
 
-  if (room.secretHash) {
+  if (token) {
+    // Token-based auth: single-use invite token
+    const tokenData = inviteTokens.get(token);
+    const valid = tokenData &&
+      tokenData.roomId === roomId &&
+      Date.now() - tokenData.createdAt <= TOKEN_TTL_MS;
+    if (!valid) {
+      recordFailedJoin(context);
+      sendError(context.ws, 'Invalid or expired invite token.', 'TOKEN_INVALID');
+      return;
+    }
+    inviteTokens.delete(token); // single-use
+  } else if (room.secretHash) {
+    // Password-based auth
     if (!secret) {
       recordFailedJoin(context);
       sendError(context.ws, 'Room requires a secret', 'ROOM_SECRET_REQUIRED');
       return;
     }
-    if (hashSecret(secret) !== room.secretHash) {
+    if (!verifySecret(secret, roomId, room.secretHash)) {
       recordFailedJoin(context);
       sendError(context.ws, 'Room secret is invalid', 'ROOM_SECRET_INVALID');
       return;
@@ -753,8 +779,8 @@ function handleChatSend(context: ConnectionContext, message: Extract<ClientToSer
   if (!trimmed) {
     return;
   }
-  if (trimmed.length > 2000) {
-    sendError(context.ws, 'Message is too long (max 2000 characters).', 'MESSAGE_TOO_LONG');
+  if (trimmed.length > 4096) {
+    sendError(context.ws, 'Message is too long (max 4096 characters).', 'MESSAGE_TOO_LONG');
     return;
   }
 
@@ -786,6 +812,18 @@ function handleChatSend(context: ConnectionContext, message: Extract<ClientToSer
 
   broadcast(room, broadcastMsg);
   log('chat_message', { roomId: room.roomId, userId: participant.userId, role: participant.role });
+}
+
+function handleCreateToken(context: ConnectionContext, label?: string): void {
+  const room = getRoomForContext(context);
+  if (!room || context.userId !== room.ownerId) {
+    sendError(context.ws, 'Only the room owner can generate invite tokens.', 'FORBIDDEN');
+    return;
+  }
+  const token = randomBytes(16).toString('hex');
+  inviteTokens.set(token, { roomId: room.roomId, label, createdAt: Date.now() });
+  send(context.ws, { type: 'tokenCreated', token, label });
+  log('token_created', { roomId: room.roomId, label });
 }
 
 function broadcast(room: RoomState, message: ServerToClientMessage, except?: WebSocket): void {
@@ -840,8 +878,19 @@ function generateRoomId(): string {
   return code;
 }
 
-function hashSecret(secret: string): string {
-  return createHash('sha256').update(secret).digest('hex');
+function hashSecret(secret: string, salt: string): string {
+  return 'pbkdf2:' + pbkdf2Sync(secret, salt, 100_000, 32, 'sha256').toString('hex');
+}
+
+function verifySecret(secret: string, roomId: string, storedHash: string): boolean {
+  if (!storedHash.startsWith('pbkdf2:')) {
+    // Legacy rooms: plain SHA-256, no salt — allow during transition
+    const legacy = createHash('sha256').update(secret).digest('hex');
+    return legacy === storedHash;
+  }
+  const newHash = Buffer.from(hashSecret(secret, roomId).slice('pbkdf2:'.length), 'hex');
+  const stored = Buffer.from(storedHash.slice('pbkdf2:'.length), 'hex');
+  return newHash.length === stored.length && timingSafeEqual(newHash, stored);
 }
 
 function isJoinBlocked(context: ConnectionContext): boolean {

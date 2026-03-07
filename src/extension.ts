@@ -15,6 +15,7 @@ import { ChatView } from './ui/ChatView';
 import { ClientToServerMessage, Participant, Role, RoomMode, ServerToClientMessage, Suggestion } from './connection/MessageTypes';
 import { DEFAULT_SERVER_URL } from './util/config';
 import { logger } from './util/logger';
+import { deriveKey, encrypt, decrypt, type EncryptedPayload } from './util/crypto';
 import { v4 as uuidv4 } from 'uuid';
 
 const DISPLAY_NAME_KEY = 'coderooms.displayName';
@@ -40,6 +41,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const pendingAck = new Map<string, ClientToServerMessage>();
   const pendingRoleUpdates = new Map<string, NodeJS.Timeout>();
   let lastRootCursorMessage: Extract<ServerToClientMessage, { type: 'rootCursor' }> | undefined;
+  let e2eKey: Buffer | undefined;     // AES-256-GCM key derived from room secret — null when no secret
+  let pendingSecret: string | undefined; // secret held in memory until roomId is known for key derivation
 
   const messageKey = (message: ClientToServerMessage): string | undefined => {
     switch (message.type) {
@@ -322,6 +325,8 @@ export function activate(context: vscode.ExtensionContext): void {
     pendingRoleUpdates.forEach(timer => clearTimeout(timer));
     pendingRoleUpdates.clear();
     lastRootCursorMessage = undefined;
+    e2eKey = undefined;
+    pendingSecret = undefined;
     statusBar.update();
     scheduleRefresh();
   }
@@ -375,12 +380,28 @@ export function activate(context: vscode.ExtensionContext): void {
         await recordRoomInfo(message.roomId, message.mode);
         chatManager.setRoom(message.roomId);
         await logRoomEvent({ type: 'joined', userId: message.userId });
+        // Derive E2E key now that we have the roomId as salt
+        if (pendingSecret) {
+          e2eKey = deriveKey(pendingSecret, message.roomId);
+          pendingSecret = undefined;
+        }
         statusBar.update();
         scheduleRefresh();
         const action = await vscode.window.showInformationMessage(`CodeRoom ready: ${message.roomId}`, 'Copy invite code');
         if (action) {
           await vscode.env.clipboard.writeText(message.roomId);
           void vscode.window.showInformationMessage('Room ID copied to clipboard.');
+        }
+        if (e2eKey) {
+          chatManager.addMessage({
+            messageId: `sys-e2e-${Date.now()}`,
+            fromUserId: 'system',
+            fromName: 'System',
+            role: 'root',
+            content: '🔒 **E2E Encryption active.** Chat messages are end-to-end encrypted with your room secret. Share the Room ID and secret separately.',
+            timestamp: Date.now(),
+            isSystem: true
+          });
         }
         break;
       }
@@ -394,14 +415,23 @@ export function activate(context: vscode.ExtensionContext): void {
         await recordRoomInfo(message.roomId, message.mode);
         roomState.setParticipants(message.participants);
         chatManager.setRoom(message.roomId);
+
+        // Derive E2E key now that we have the roomId as salt
+        if (pendingSecret) {
+          e2eKey = deriveKey(pendingSecret, message.roomId);
+          pendingSecret = undefined;
+        }
         
-        let welcomeText = `\`\`\n��� Welcome to the CodeRoom! You joined as a ${message.role}.\n\`\`\n`;
+        let welcomeText = `\`\`\n👋 Welcome to the CodeRoom! You joined as a ${message.role}.\n\`\`\n`;
         if (message.role === 'collaborator') {
-          welcomeText += `��� **Suggest Mode:** By default, edits you make turn into inline suggestions for the room owner to approve!\n��� **Direct Edit:** To bypass suggestions and type directly, click the pencil icon in the People panel or toggle the "Suggest" Status Bar item.`;
+          welcomeText += `✏️ **Suggest Mode:** By default, edits you make turn into inline suggestions for the room owner to approve!\n🖊️ **Direct Edit:** To bypass suggestions and type directly, click the pencil icon in the People panel or toggle the "Suggest" Status Bar item.`;
         } else if (message.role === 'viewer') {
-          welcomeText += `���️ **Read Only:** You are currently in read-only mode.`;
+          welcomeText += `👁️ **Read Only:** You are currently in read-only mode.`;
         } else {
-          welcomeText += `��� **Owner:** You are the room owner. To share files, open a document and click the "Share Document" icon in the top right window menu, or right click it in the explorer!`;
+          welcomeText += `🏠 **Owner:** You are the room owner. To share files, open a document and click the "Share Document" icon in the top right window menu, or right click it in the explorer!`;
+        }
+        if (e2eKey) {
+          welcomeText += `\n🔒 **E2E Encryption active.** Chat is end-to-end encrypted with your room secret.`;
         }
 
         chatManager.addMessage({
@@ -563,16 +593,34 @@ export function activate(context: vscode.ExtensionContext): void {
         break;
       }
       case 'chatMessage': {
+        let content = message.content;
+        // Decrypt if E2E is active and content is an encrypted blob
+        if (e2eKey && content.startsWith('e2e:')) {
+          try {
+            const payload = JSON.parse(content.slice(4)) as EncryptedPayload;
+            content = decrypt(payload, e2eKey) ?? '🔒 [encrypted — wrong key or tampered data]';
+          } catch {
+            content = '🔒 [could not decrypt message]';
+          }
+        }
         chatManager.addMessage({
           messageId: message.messageId,
           fromUserId: message.fromUserId,
           fromName: message.fromName,
           role: message.role,
-          content: message.content,
+          content,
           timestamp: message.timestamp,
           isSystem: message.isSystem
         });
         pendingAck.delete(`chat:${message.messageId}`);
+        break;
+      }
+      case 'tokenCreated': {
+        const label = message.label ? ` for "${message.label}"` : '';
+        await vscode.env.clipboard.writeText(message.token);
+        void vscode.window.showInformationMessage(
+          `Invite token${label} copied to clipboard. It's single-use and expires in 24h — send it directly to one participant.`
+        );
         break;
       }
       case 'error': {
@@ -607,6 +655,9 @@ export function activate(context: vscode.ExtensionContext): void {
             break;
           case 'DOCUMENT_TOO_LARGE':
             void vscode.window.showWarningMessage('The document is too large to share (max 2 MB).');
+            break;
+          case 'TOKEN_INVALID':
+            void vscode.window.showErrorMessage('Invite token is invalid or has expired. Ask the room owner for a new one.');
             break;
           default:
             if (payload.toLowerCase().includes('room not found')) {
@@ -646,6 +697,7 @@ export function activate(context: vscode.ExtensionContext): void {
       password: true
     });
     const secret = secretInput?.trim() ? secretInput.trim() : undefined;
+    pendingSecret = secret; // stored for E2E key derivation once roomId is known
     webSocket.send({ type: 'createRoom', displayName, mode, secret });
   }
 
@@ -662,14 +714,18 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     const secretInput = await vscode.window.showInputBox({
-      prompt: 'Enter room secret if required (leave blank otherwise)',
+      prompt: 'Enter room secret or invite token (leave blank if not required)',
       ignoreFocusOut: true,
       password: true
     });
-    const secret = secretInput?.trim() ? secretInput.trim() : undefined;
+    const secretOrToken = secretInput?.trim();
+    const isToken = Boolean(secretOrToken && /^[0-9a-f]{32}$/.test(secretOrToken));
+    const secret = isToken ? undefined : (secretOrToken || undefined);
+    const token = isToken ? secretOrToken : undefined;
+    pendingSecret = secret; // only real passwords drive E2E; tokens don't carry a key
     lastJoinRoomId = roomId.trim();
     lastJoinDisplayName = displayName;
-    webSocket.send({ type: 'joinRoom', roomId: roomId.trim(), displayName, secret });
+    webSocket.send({ type: 'joinRoom', roomId: roomId.trim(), displayName, secret, token });
   }
 
   function leaveRoom(): void {
@@ -970,6 +1026,26 @@ export function activate(context: vscode.ExtensionContext): void {
     scheduleRefresh();
   }
 
+  async function generateInviteToken(): Promise<void> {
+    if (!roomState.isRoot()) {
+      void vscode.window.showWarningMessage('Only the room owner can generate invite tokens.');
+      return;
+    }
+    if (!roomState.getRoomId()) {
+      void vscode.window.showWarningMessage('Start or join a room first.');
+      return;
+    }
+    const label = await vscode.window.showInputBox({
+      prompt: 'Optional label for this token (e.g. participant name)',
+      placeHolder: 'Leave blank for anonymous token',
+      ignoreFocusOut: true
+    });
+    if (label === undefined) {
+      return; // user cancelled
+    }
+    webSocket.send({ type: 'createToken', label: label.trim() || undefined });
+  }
+
   async function reconnect(): Promise<void> {
     await ensureConnection(ConnectionIntent.ForceReconnect);
   }
@@ -999,9 +1075,18 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!content || !content.trim()) {
       return;
     }
+    const trimmed = content.trim();
+    if (trimmed.length > 2000) {
+      void vscode.window.showWarningMessage('Message is too long (max 2000 characters).');
+      return;
+    }
     const messageId = uuidv4();
     const timestamp = Date.now();
-    webSocket.send({ type: 'chatSend', roomId, messageId, content, timestamp });
+    // Encrypt if E2E is active — server relays ciphertext without seeing plaintext
+    const finalContent = e2eKey
+      ? `e2e:${JSON.stringify(encrypt(trimmed, e2eKey))}`
+      : trimmed;
+    webSocket.send({ type: 'chatSend', roomId, messageId, content: finalContent, timestamp });
   }
 
   function openChat(): void {
@@ -1033,11 +1118,15 @@ export function activate(context: vscode.ExtensionContext): void {
       ignoreFocusOut: true,
       password: true
     });
-    const secret = secretInput?.trim() ? secretInput.trim() : undefined;
-    if (!secret) {
+    const secretOrToken = secretInput?.trim();
+    const isToken = Boolean(secretOrToken && /^[0-9a-f]{32}$/.test(secretOrToken));
+    const secret = isToken ? undefined : (secretOrToken || undefined);
+    const token = isToken ? secretOrToken : undefined;
+    if (!secret && !token) {
       return;
     }
-    webSocket.send({ type: 'joinRoom', roomId: lastJoinRoomId, displayName: lastJoinDisplayName, secret });
+    pendingSecret = secret;
+    webSocket.send({ type: 'joinRoom', roomId: lastJoinRoomId, displayName: lastJoinDisplayName, secret, token });
   }
 
   context.subscriptions.push(
@@ -1071,6 +1160,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('coderooms.showStatus', showStatus),
     vscode.commands.registerCommand('coderooms.reconnect', reconnect),
+    vscode.commands.registerCommand('coderooms.generateInviteToken', generateInviteToken),
     configWatcher
   );
 }

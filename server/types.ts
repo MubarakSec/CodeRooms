@@ -34,7 +34,7 @@ export interface Suggestion {
 
 export type ClientToServerMessage =
   | { type: "createRoom"; displayName: string; mode: RoomMode; secret?: string }
-  | { type: "joinRoom"; roomId: string; displayName: string; secret?: string }
+  | { type: "joinRoom"; roomId: string; displayName: string; secret?: string; token?: string }
   | { type: "leaveRoom" }
   | { type: "updateRole"; userId: string; role: "collaborator" | "viewer" }
   | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text: string; version: number }
@@ -49,7 +49,8 @@ export type ClientToServerMessage =
   | { type: "rootCursor"; roomId: string; docId: string; uri: string; position: Position }
   | { type: "cursorUpdate"; roomId: string; userId?: string; userName?: string; docId: string; uri: string; position: Position; selections?: { start: Position; end: Position }[] }
   | { type: "participantActivity"; roomId: string; userId: string; activity: "typing" | "idle"; at: number }
-  | { type: "chatSend"; roomId: string; messageId: string; content: string; timestamp: number };
+  | { type: "chatSend"; roomId: string; messageId: string; content: string; timestamp: number }
+  | { type: "createToken"; label?: string };
 
 export type ServerToClientMessage =
   | { type: "roomCreated"; roomId: string; userId: string; mode: RoomMode }
@@ -80,4 +81,5 @@ export type ServerToClientMessage =
       timestamp: number;
       isSystem?: boolean;
     }
-  | { type: "error"; message: string; code?: string };
+  | { type: "error"; message: string; code?: string }
+  | { type: "tokenCreated"; token: string; label?: string };
