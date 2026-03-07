@@ -405,8 +405,6 @@ export function activate(context: vscode.ExtensionContext): void {
         }
 
         chatManager.addMessage({
-          type: 'chatMessage',
-          roomId: message.roomId,
           messageId: `sys-welcome-${Date.now()}`,
           fromUserId: 'system',
           fromName: 'System',

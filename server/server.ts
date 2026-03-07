@@ -15,6 +15,7 @@ import { log } from './logger';
 import { applyPatch, applyPatches } from './patch';
 import { RateLimiter } from './rateLimiter';
 import path from 'path';
+import { pack, unpack } from 'msgpackr';
 
 type ParticipantState = Participant & { isDirectEditMode?: boolean };
 
@@ -137,7 +138,12 @@ wss.on('connection', (ws, request) => {
 
   ws.on('message', payload => {
     try {
-      const message = JSON.parse(payload.toString()) as ClientToServerMessage;
+      let message: ClientToServerMessage;
+      if (Buffer.isBuffer(payload) || payload instanceof Uint8Array || Array.isArray(payload)) {
+        message = unpack(payload as Buffer);
+      } else {
+        message = JSON.parse(payload.toString()) as ClientToServerMessage;
+      }
       handleMessage(context, message);
     } catch (error) {
       sendError(ws, 'Invalid payload received', 'PAYLOAD_INVALID');
