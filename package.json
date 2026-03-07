@@ -1,0 +1,296 @@
+{
+    "name": "coderooms",
+    "displayName": "CodeRooms",
+    "description": "Real-time collaborative coding inside VSCode with role-based rooms.",
+    "version": "0.1.0",
+    "publisher": "mobta",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+    "categories": [
+        "Other"
+    ],
+    "activationEvents": [
+        "onCommand:coderooms.startAsRoot",
+        "onCommand:coderooms.joinRoom",
+        "onCommand:coderooms.leaveRoom",
+        "onCommand:coderooms.shareCurrentFile",
+        "onCommand:coderooms.toggleCollaboratorMode",
+        "onCommand:coderooms.toggleFollowRoot",
+        "onCommand:coderooms.exportRoom",
+        "onCommand:coderooms.openParticipantsView",
+        "onCommand:coderooms.changeParticipantRole",
+        "onCommand:coderooms.copyRoomId",
+        "onCommand:coderooms.stopRoom",
+        "onCommand:coderooms.setParticipantRoleRoot",
+        "onCommand:coderooms.setParticipantRoleCollaborator",
+        "onCommand:coderooms.setParticipantRoleViewer",
+        "onCommand:coderooms.kickParticipant",
+        "onCommand:coderooms.acceptSuggestion",
+        "onCommand:coderooms.rejectSuggestion",
+        "onCommand:coderooms.unshareCurrentFile",
+        "onView:coderoomsChat",
+        "onView:coderoomsPanel",
+        "onView:coderoomsParticipants",
+        "onCommand:coderooms.reconnect",
+        "onCommand:coderooms.focusChatInput",
+        "onView:coderoomsChatView"
+    ],
+    "main": "./out/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run bundle",
+    "compile": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.js --sourcemap --log-level=warning",
+    "watch": "tsc -watch -p .",
+    "package": "npx vsce package",
+    "server:build": "tsc -p server/tsconfig.json",
+    "server:start": "node ./out-server/server.js",
+    "test": "vitest run --exclude out/** --exclude out-server/**"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
+    "@types/minimist": "^1.2.5",
+    "@types/node": "^20.4.2",
+    "@types/uuid": "^9.0.7",
+    "@types/vscode": "^1.80.0",
+    "@types/ws": "^8.6.11",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.4.5",
+    "vitest": "^2.1.1"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.10",
+    "minimist": "^1.2.8",
+    "uuid": "^9.0.0",
+    "ws": "^8.13.0"
+  },
+  "contributes": {
+        "commands": [
+            {
+                "command": "coderooms.startAsRoot",
+                "title": "CodeRooms: Start Room as Root"
+            },
+            {
+                "command": "coderooms.joinRoom",
+                "title": "CodeRooms: Join Room"
+            },
+            {
+                "command": "coderooms.leaveRoom",
+                "title": "CodeRooms: Leave Room"
+            },
+            {
+                "command": "coderooms.shareCurrentFile",
+                "title": "CodeRooms: Share Current File"
+            },
+            {
+                "command": "coderooms.toggleCollaboratorMode",
+                "title": "CodeRooms: Toggle Collaborator Mode"
+            },
+            {
+                "command": "coderooms.toggleFollowRoot",
+                "title": "CodeRooms: Toggle Follow Root"
+            },
+            {
+                "command": "coderooms.exportRoom",
+                "title": "CodeRooms: Export Room"
+            },
+            {
+                "command": "coderooms.openParticipantsView",
+                "title": "CodeRooms: Show Participants"
+            },
+            {
+                "command": "coderooms.changeParticipantRole",
+                "title": "CodeRooms: Change Participant Role"
+            },
+            {
+                "command": "coderooms.copyRoomId",
+                "title": "CodeRooms: Copy Room ID"
+            },
+            {
+                "command": "coderooms.stopRoom",
+                "title": "CodeRooms: Stop Room"
+            },
+            {
+        "command": "coderooms.setParticipantRoleRoot",
+        "title": "CodeRooms: Set Role ? Root"
+      },
+      {
+        "command": "coderooms.setParticipantRoleCollaborator",
+        "title": "CodeRooms: Set Role ? Collaborator"
+      },
+      {
+        "command": "coderooms.setParticipantRoleViewer",
+        "title": "CodeRooms: Set Role ? Viewer"
+      },
+      {
+        "command": "coderooms.kickParticipant",
+        "title": "CodeRooms: Remove Participant"
+      },
+            {
+                "command": "coderooms.acceptSuggestion",
+                "title": "CodeRooms: Accept Suggestion"
+            },
+      {
+        "command": "coderooms.rejectSuggestion",
+        "title": "CodeRooms: Reject Suggestion"
+      },
+      {
+        "command": "coderooms.clearPendingSuggestions",
+        "title": "CodeRooms: Clear Pending Suggestions"
+      },
+      {
+        "command": "coderooms.unshareCurrentFile",
+        "title": "CodeRooms: Stop Sharing Current File"
+      },
+      {
+        "command": "coderooms.sendPendingSuggestion",
+        "title": "CodeRooms: Send Pending Suggestion"
+      },
+      {
+        "command": "coderooms.quickSettings",
+        "title": "CodeRooms: Quick Settings"
+      },
+      {
+        "command": "coderooms.showStatus",
+        "title": "CodeRooms: Show Status"
+      },
+      {
+        "command": "coderooms.sendChatMessage",
+        "title": "CodeRooms: Send Chat Message"
+      },
+      {
+        "command": "coderooms.openChat",
+        "title": "CodeRooms: Open Chat"
+      },
+      {
+        "command": "coderooms.focusChatInput",
+        "title": "CodeRooms: Focus Chat Input"
+      },
+      {
+        "command": "coderooms.setActiveDocument",
+        "title": "CodeRooms: Open Shared Document"
+      },
+            {
+                "command": "coderooms.reconnect",
+                "title": "CodeRooms: Reconnect"
+            },
+            {
+                "command": "coderooms.ownerActionInfo",
+                "title": "CodeRooms: Owner Action Info"
+            }
+        ],
+        "configuration": {
+            "type": "object",
+            "title": "CodeRooms",
+            "properties": {
+                "coderooms.serverUrl": {
+                    "type": "string",
+                    "default": "ws://localhost:5171",
+                    "description": "WebSocket URL for the CodeRooms coordination server."
+                },
+        "coderooms.mode": {
+          "type": "string",
+          "enum": [
+            "team",
+            "classroom"
+          ],
+          "default": "team",
+          "description": "Default mode for newly created CodeRooms."
+        },
+        "coderooms.debugLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verbose CodeRooms logging (info-level) in the developer console."
+        }
+      }
+    },
+        "views": {
+            "explorer": [
+                {
+                    "id": "coderoomsParticipants",
+                    "name": "CodeRooms Room"
+                }
+            ],
+            "coderooms": [
+                {
+                    "id": "coderoomsPanel",
+                    "name": "Session"
+                },
+                {
+                    "id": "coderoomsChatView",
+                    "name": "CodeRooms Chat",
+                    "type": "webview"
+                }
+            ]
+        },
+        "menus": {
+            "view/title": [
+                {
+                    "command": "coderooms.sendChatMessage",
+                    "when": "view == coderoomsChatView",
+                    "group": "navigation@1"
+                }
+            ],
+            "view/item/context": [
+                {
+                    "group": "coderooms@1",
+                    "command": "coderooms.setParticipantRoleRoot",
+                    "when": "(view == coderoomsPanel || view == coderoomsParticipants) && viewItem == coderooms.participant.owner"
+                },
+                {
+                    "group": "coderooms@1",
+                    "command": "coderooms.setParticipantRoleCollaborator",
+                    "when": "(view == coderoomsPanel || view == coderoomsParticipants) && viewItem == coderooms.participant.owner"
+                },
+                {
+                    "group": "coderooms@1",
+                    "command": "coderooms.setParticipantRoleViewer",
+                    "when": "(view == coderoomsPanel || view == coderoomsParticipants) && viewItem == coderooms.participant.owner"
+                },
+                {
+                    "group": "coderooms@2",
+                    "command": "coderooms.kickParticipant",
+                    "when": "(view == coderoomsPanel || view == coderoomsParticipants) && (viewItem == coderooms.participant.owner)"
+                },
+                {
+                    "group": "coderooms@1",
+                    "command": "coderooms.ownerActionInfo",
+                    "when": "(view == coderoomsPanel || view == coderoomsParticipants) && viewItem == coderooms.participant.readonly",
+                    "alt": "coderooms.ownerActionInfo"
+                },
+                {
+                    "group": "coderooms@2",
+                    "command": "coderooms.ownerActionInfo",
+                    "when": "(view == coderoomsPanel || view == coderoomsParticipants) && viewItem == coderooms.participant.readonly",
+                    "alt": "coderooms.ownerActionInfo"
+                },
+                {
+                    "group": "coderooms@3",
+                    "command": "coderooms.acceptSuggestion",
+                    "when": "view == coderoomsPanel && viewItem == coderooms.suggestion.root"
+                },
+                {
+                    "group": "coderooms@3",
+                    "command": "coderooms.rejectSuggestion",
+                    "when": "view == coderoomsPanel && viewItem == coderooms.suggestion.root"
+                }
+            ]
+        },
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "title": "CodeRooms",
+                    "id": "coderooms",
+                    "icon": "media/coderooms.svg"
+                }
+            ]
+        },
+        "viewsWelcome": [
+            {
+                "view": "coderoomsChatView",
+                "contents": "Send a quick message to everyone in the room.\\n[Focus message box](command:coderooms.focusChatInput)"
+            }
+        ]
+    }
+}

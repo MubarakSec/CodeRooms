@@ -1,0 +1,14 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" fill="none">
+  <!-- رمز الكود </>
+       Left: <
+       Right: >
+       Middle: _ -->
+  <path d="M84 76 L44 128 L84 180" stroke="currentColor" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M172 76 L212 128 L172 180" stroke="currentColor" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="92" y1="198" x2="164" y2="198" stroke="currentColor" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- نقاط تمثّل المشاركين -->
+  <circle cx="82" cy="52" r="11" fill="currentColor" fill-opacity="0.8"/>
+  <circle cx="128" cy="44" r="11" fill="currentColor" fill-opacity="0.6"/>
+  <circle cx="174" cy="52" r="11" fill="currentColor" fill-opacity="0.9"/>
+</svg>

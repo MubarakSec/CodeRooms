@@ -1,0 +1,36 @@
+import { Participant, Role, RoomMode } from '../connection/MessageTypes';
+export declare class RoomState {
+    private roomId?;
+    private userId?;
+    private role?;
+    private displayName?;
+    private participants;
+    private collaboratorDirectMode;
+    private participantActivity;
+    private mode?;
+    private activeSharedDocLabel?;
+    setSelfInfo(userId: string, role: Role, roomId?: string, displayName?: string): void;
+    reset(): void;
+    setParticipants(list: Participant[]): void;
+    addParticipant(participant: Participant): void;
+    removeParticipant(userId: string): void;
+    updateParticipantRole(userId: string, role: Role): void;
+    updateParticipantMode(userId: string, direct: boolean): void;
+    getRoomId(): string | undefined;
+    getUserId(): string | undefined;
+    getRole(): Role | undefined;
+    getDisplayName(): string | undefined;
+    getParticipants(): Participant[];
+    isRoot(): boolean;
+    isCollaborator(): boolean;
+    isViewer(): boolean;
+    setCollaboratorMode(direct: boolean): void;
+    isCollaboratorInDirectMode(): boolean;
+    setActiveSharedDocLabel(label?: string): void;
+    getActiveSharedDocLabel(): string | undefined;
+    setParticipantActivity(userId: string, at: number): void;
+    isParticipantTyping(userId: string): boolean;
+    setMode(mode: RoomMode | undefined): void;
+    getRoomMode(): RoomMode | undefined;
+    private syncCollaboratorMode;
+}

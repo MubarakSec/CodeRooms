@@ -1,0 +1,9 @@
+﻿node_modules
+out-server
+.vscode
+.vscode-test
+*.vsix
+out/test
+server
+*.map
+coverage
