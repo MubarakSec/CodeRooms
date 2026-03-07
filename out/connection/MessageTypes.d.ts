@@ -1,5 +1,10 @@
 export type Role = "root" | "collaborator" | "viewer";
 export type RoomMode = "team" | "classroom";
+export interface EncryptedPayload {
+    iv: string;
+    data: string;
+    authTag: string;
+}
 export interface Participant {
     userId: string;
     displayName: string;
@@ -100,6 +105,18 @@ export type ClientToServerMessage = {
     uri: string;
     position: Position;
 } | {
+    type: "cursorUpdate";
+    roomId: string;
+    userId?: string;
+    userName?: string;
+    docId: string;
+    uri: string;
+    position: Position;
+    selections?: {
+        start: Position;
+        end: Position;
+    }[];
+} | {
     type: "participantActivity";
     roomId: string;
     userId: string;
@@ -184,6 +201,18 @@ export type ServerToClientMessage = {
     docId: string;
     uri: string;
     position: Position;
+} | {
+    type: "cursorUpdate";
+    roomId: string;
+    userId?: string;
+    userName?: string;
+    docId: string;
+    uri: string;
+    position: Position;
+    selections?: {
+        start: Position;
+        end: Position;
+    }[];
 } | {
     type: "participantActivity";
     roomId: string;

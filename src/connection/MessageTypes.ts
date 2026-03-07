@@ -1,6 +1,12 @@
 export type Role = "root" | "collaborator" | "viewer";
 export type RoomMode = "team" | "classroom";
 
+export interface EncryptedPayload {
+  iv: string;
+  data: string;
+  authTag: string;
+}
+
 export interface Participant {
   userId: string;
   displayName: string;
