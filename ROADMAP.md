@@ -33,34 +33,42 @@ CodeRooms should feel production-ready for small teams and classrooms:
 
 The highest current risks are:
 
-- Baseline CI, linting, coverage thresholds, and release guardrails from Milestone 0 are still not in place.
 - Milestone 7 performance/scalability work is still ahead, especially tree refresh pressure, cursor repaint churn, and larger-room profiling.
-- The code is materially safer now, but it still needs longer-duration soak testing and multi-client load validation before calling it production-hardened.
+- Release-readiness still needs longer-duration soak testing, packaged-extension validation, and larger-room profiling before calling CodeRooms production-hardened.
+- Extension/server entrypoints still have less automated coverage than the collaboration core, so orchestration regressions remain a secondary risk class.
 
 ## Progress Snapshot
 
 Current implementation status:
 
+- Milestone 0 is complete: CI guardrails, linting, coverage thresholds, release checklisting, and protocol invariants coverage are in place.
 - Milestones 1 through 6 are complete and verified by the current automated suite.
-- The latest verification pass is green for `npm run typecheck`, `npm test`, and `npm run server:build`.
-- Milestone 0 and Milestone 7 remain the active roadmap tracks.
+- The latest verification pass is green for `npm run verify` and `npm run test:coverage`.
+- Milestone 7 is now the primary active roadmap track.
 
 Next focus:
 
-- Milestone 0 baseline guardrails.
 - Milestone 7 performance and scalability.
-- Additional soak/load testing once the remaining guardrails are in place.
+- Milestone 8 release readiness and soak testing.
+- Additional packaged-extension validation in a clean VS Code profile.
 
 ## Milestone 0: Baseline and Guardrails
 
 Goal: stop regressions while larger refactors are in flight.
 
-- [ ] Add CI gates for `npm test`, `npm run typecheck`, and `npm run server:build`.
-- [ ] Add a linting pass for client, shared, and server code.
-- [ ] Add a small multi-client integration harness for protocol scenarios.
-- [ ] Add coverage reporting and require minimum thresholds for core modules.
-- [ ] Add a release checklist for restart, reconnect, suggestions, and multi-document sync.
-- [ ] Add a dedicated "protocol invariants" test suite for authz and room lifecycle.
+- [x] Add CI gates for `npm test`, `npm run typecheck`, and `npm run server:build`.
+- [x] Add a linting pass for client, shared, and server code.
+- [x] Add a small multi-client integration harness for protocol scenarios.
+- [x] Add coverage reporting and require minimum thresholds for core modules.
+- [x] Add a release checklist for restart, reconnect, suggestions, and multi-document sync.
+- [x] Add a dedicated "protocol invariants" test suite for authz and room lifecycle.
+
+Representative coverage:
+
+- [x] CI runs the guarded verification pipeline plus the coverage job on every push and pull request.
+- [x] The multi-client harness and `protocolInvariants` suite exercise owner authz, session reclaim, tracked terminal responses, and room closure flows.
+- [x] The coverage report enforces minimum thresholds on the tested collaboration core instead of treating the whole repo as equally instrumented.
+- [x] The release checklist captures restart, reconnect, suggestion, and multi-document sync gates before packaging.
 
 Success criteria:
 
