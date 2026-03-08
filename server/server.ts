@@ -2,15 +2,13 @@ import { randomBytes, pbkdf2, timingSafeEqual } from 'crypto';
 import { promisify } from 'util';
 
 const pbkdf2Async = promisify(pbkdf2);
-import fs from 'fs';
-import { promises as fsp } from 'fs';
+import fs, { promises as fsp } from 'fs';
 import https from 'https';
 import minimist from 'minimist';
 import { v4 as uuidv4 } from 'uuid';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   ClientToServerMessage,
-  Participant,
   Role,
   RoomMode,
   ServerToClientMessage,
@@ -107,18 +105,37 @@ interface RoomState {
   chat: RoomChatMessage[];
 }
 
+export interface StartCodeRoomsServerOptions {
+  port?: number;
+  host?: string;
+  certPath?: string;
+  keyPath?: string;
+  backupDir?: string;
+  persistRooms?: boolean;
+  loadPersistedRooms?: boolean;
+  enableBackgroundTasks?: boolean;
+  installProcessHandlers?: boolean;
+  logToConsole?: boolean;
+}
+
+export interface StartedCodeRoomsServer {
+  host: string;
+  port: number;
+  tls: boolean;
+  close(): Promise<void>;
+}
+
 const rooms = new Map<string, RoomState>();
-const joinLimiter = new RateLimiter(60_000, 20, 3 * 60_000);
+let joinLimiter = new RateLimiter(60_000, 20, 3 * 60_000);
 // Per-user rate limiters for chat and suggestions (10 messages per 10s, block 30s)
-const chatLimiter = new RateLimiter(10_000, 10, 30_000);
-const suggestionLimiter = new RateLimiter(30_000, 5, 60_000);
-const cursorLimiter = new RateLimiter(1_000, 120, 5_000);
-const activityLimiter = new RateLimiter(5_000, 20, 10_000);
+let chatLimiter = new RateLimiter(10_000, 10, 30_000);
+let suggestionLimiter = new RateLimiter(30_000, 5, 60_000);
+let cursorLimiter = new RateLimiter(1_000, 120, 5_000);
+let activityLimiter = new RateLimiter(5_000, 20, 10_000);
 const MAX_CHAT_MESSAGES = 500;
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const inviteTokens = new Map<string, { roomId: string; label?: string; createdAt: number }>();
-const BACKUP_DIR = path.join(__dirname, '..', 'backups');
-const BACKUP_FILE = path.join(BACKUP_DIR, 'rooms-backup.json');
+const DEFAULT_BACKUP_DIR = path.join(__dirname, '..', 'backups');
 const MAX_MESSAGE_BYTES = 512 * 1024; // 512 KB hard limit per message
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024; // 2 MB limit for shared documents
 const MAX_ROOMS_GLOBAL = 500;
@@ -131,13 +148,19 @@ const MAX_TOTAL_DOC_BYTES = 256 * 1024 * 1024; // 256 MB total memory budget for
 let totalDocBytes = 0;
 const roomCountByIp = new Map<string, number>();
 const connectionsPerIp = new Map<string, number>();
-const roomOperationGuards = createRoomOperationGuards();
+let roomOperationGuards = createRoomOperationGuards();
 const roomLastActivity = new Map<string, number>();
-
-// Ensure backup directory exists
-if (!fs.existsSync(BACKUP_DIR)) {
-  fs.mkdirSync(BACKUP_DIR, { recursive: true });
-}
+let backupDir = DEFAULT_BACKUP_DIR;
+let backupFile = path.join(DEFAULT_BACKUP_DIR, 'rooms-backup.json');
+let persistRoomsEnabled = true;
+let loadPersistedRoomsEnabled = true;
+let activeWss: WebSocketServer | undefined;
+let activeHttpsServer: https.Server | undefined;
+let autoSaveTimer: NodeJS.Timeout | undefined;
+let cleanupTimer: NodeJS.Timeout | undefined;
+let queueRoomSave: (() => Promise<void>) | undefined;
+let sigtermHandler: (() => void) | undefined;
+let sigintHandler: (() => void) | undefined;
 
 function buildPersistedRoomsSnapshot(): Record<string, PersistedRoomState> {
   const data: Record<string, PersistedRoomState> = {};
@@ -169,28 +192,31 @@ function buildCurrentRecoveryMetrics() {
 }
 
 async function saveRooms(): Promise<void> {
+  if (!persistRoomsEnabled) {
+    return;
+  }
   const data = buildPersistedRoomsSnapshot();
   const savedAt = Date.now();
   const metrics = buildCurrentRecoveryMetrics();
   
   // Atomic write: write to temp file first, then rename to prevent corruption on crash
-  await writeRoomsBackupAtomically(fsp, BACKUP_FILE, serializeRoomsBackup(data, savedAt));
+  await writeRoomsBackupAtomically(fsp, backupFile, serializeRoomsBackup(data, savedAt));
   
   // Create timestamped backup (keep last 10)
   const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
-  const archivedFile = path.join(BACKUP_DIR, `rooms-${timestamp}.json`);
+  const archivedFile = path.join(backupDir, `rooms-${timestamp}.json`);
   await fsp.writeFile(archivedFile, serializeRoomsBackup(data, savedAt));
   
   // Cleanup old backups (keep last 10)
   try {
-    const files = (await fsp.readdir(BACKUP_DIR))
+    const files = (await fsp.readdir(backupDir))
       .filter(f => f.startsWith('rooms-') && f.endsWith('.json') && f !== 'rooms-backup.json')
       .sort()
       .reverse();
     
     if (files.length > 10) {
       for (let i = 10; i < files.length; i++) {
-        await fsp.unlink(path.join(BACKUP_DIR, files[i]));
+        await fsp.unlink(path.join(backupDir, files[i]));
       }
     }
   } catch (e) {
@@ -209,15 +235,15 @@ async function saveRooms(): Promise<void> {
 }
 
 function loadRooms(): void {
-  if (!fs.existsSync(BACKUP_FILE)) {
+  if (!loadPersistedRoomsEnabled || !fs.existsSync(backupFile)) {
     log('rooms_restore_skipped', { reason: 'no_backup' });
     return;
   }
 
-  log('rooms_restore_started', { backupFile: BACKUP_FILE });
+  log('rooms_restore_started', { backupFile: backupFile });
 
   try {
-    const raw = fs.readFileSync(BACKUP_FILE, 'utf-8');
+    const raw = fs.readFileSync(backupFile, 'utf-8');
     const parsedBackup = parseRoomsBackup(raw);
     for (const roomId in parsedBackup.rooms) {
       const d = parsedBackup.rooms[roomId];
@@ -277,10 +303,10 @@ function loadRooms(): void {
       ownerIpBuckets: recovered.roomCountByIp.size
     });
   } catch (e) {
-    const corruptPath = getCorruptBackupPath(BACKUP_FILE);
+    const corruptPath = getCorruptBackupPath(backupFile);
     try {
-      fs.renameSync(BACKUP_FILE, corruptPath);
-      log('backup_quarantined', { backupFile: BACKUP_FILE, corruptPath });
+      fs.renameSync(backupFile, corruptPath);
+      log('backup_quarantined', { backupFile: backupFile, corruptPath });
     } catch (renameError) {
       log('backup_quarantine_error', { error: String(renameError) });
     }
@@ -288,61 +314,67 @@ function loadRooms(): void {
   }
 }
 
+const DEFAULT_AUTO_SAVE_INTERVAL_MS = 30_000;
+const DEFAULT_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_IDLE_ROOM_TIMEOUT_MS = 10 * 60 * 1000;
 
-const args = minimist(process.argv.slice(2), {
-  alias: { p: 'port', h: 'host' },
-  string: ['port', 'host', 'cert', 'key']
-});
-const fileConfig = loadConfig();
-const port = Number(args.port ?? process.env.CODEROOMS_PORT ?? fileConfig.port ?? 5171);
-const host = (args.host ?? process.env.CODEROOMS_HOST ?? fileConfig.host ?? '127.0.0.1') as string;
-
-// TLS support: provide --cert and --key to enable WSS
-const certPath = args.cert ?? process.env.CODEROOMS_CERT ?? fileConfig.cert;
-const keyPath = args.key ?? process.env.CODEROOMS_KEY ?? fileConfig.key;
-
-let wss: WebSocketServer;
-if (certPath && keyPath) {
-  const httpsServer = https.createServer({
-    cert: fs.readFileSync(certPath),
-    key: fs.readFileSync(keyPath)
-  });
-  wss = new WebSocketServer({ server: httpsServer, maxPayload: MAX_MESSAGE_BYTES });
-  httpsServer.listen(port, host);
-  log('server_listening', { host, port, tls: true });
-  console.log(`CodeRooms server listening on wss://${host}:${port}`);
-} else {
-  wss = new WebSocketServer({ port, host, maxPayload: MAX_MESSAGE_BYTES });
-  log('server_listening', { host, port, tls: false });
-  console.log(`CodeRooms server listening on ws://${host}:${port}`);
+function resetInMemoryState(): void {
+  rooms.clear();
+  inviteTokens.clear();
+  roomCountByIp.clear();
+  connectionsPerIp.clear();
+  roomLastActivity.clear();
+  totalDocBytes = 0;
+  joinLimiter = new RateLimiter(60_000, 20, 3 * 60_000);
+  chatLimiter = new RateLimiter(10_000, 10, 30_000);
+  suggestionLimiter = new RateLimiter(30_000, 5, 60_000);
+  cursorLimiter = new RateLimiter(1_000, 120, 5_000);
+  activityLimiter = new RateLimiter(5_000, 20, 10_000);
+  roomOperationGuards = createRoomOperationGuards();
 }
 
-// Load rooms from backup on startup
-loadRooms();
-
-const queueRoomSave = createSerialTaskRunner(
-  async () => {
-    if (rooms.size === 0) {
-      return;
-    }
-    await saveRooms();
-  },
-  error => {
-    log('rooms_save_error', { error: error instanceof Error ? error.message : String(error) });
+function ensureBackupDirectory(): void {
+  if (!persistRoomsEnabled && !loadPersistedRoomsEnabled) {
+    return;
   }
-);
+  if (!fs.existsSync(backupDir)) {
+    fs.mkdirSync(backupDir, { recursive: true });
+  }
+}
 
-// Auto-save rooms every 30 seconds
-setInterval(() => {
-  void queueRoomSave();
-}, 30_000);
+function createQueueRoomSave(): () => Promise<void> {
+  return createSerialTaskRunner(
+    async () => {
+      if (rooms.size === 0) {
+        return;
+      }
+      await saveRooms();
+    },
+    error => {
+      log('rooms_save_error', { error: error instanceof Error ? error.message : String(error) });
+    }
+  );
+}
 
-// Save rooms on shutdown (sync fallback for process exit)
+function clearBackgroundTasks(): void {
+  if (autoSaveTimer) {
+    clearInterval(autoSaveTimer);
+    autoSaveTimer = undefined;
+  }
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+    cleanupTimer = undefined;
+  }
+}
+
 function saveRoomsSync(): void {
+  if (!persistRoomsEnabled) {
+    return;
+  }
   const data = buildPersistedRoomsSnapshot();
   const metrics = buildCurrentRecoveryMetrics();
   const savedAt = Date.now();
-  writeRoomsBackupAtomicallySync(fs, BACKUP_FILE, serializeRoomsBackup(data, savedAt));
+  writeRoomsBackupAtomicallySync(fs, backupFile, serializeRoomsBackup(data, savedAt));
   log('rooms_saved_sync', {
     roomCount: metrics.roomCount,
     documentCount: metrics.documentCount,
@@ -354,107 +386,261 @@ function saveRoomsSync(): void {
   });
 }
 
-process.on('SIGTERM', () => {
-  log('server_shutdown', { reason: 'SIGTERM' });
-  saveRoomsSync();
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  log('server_shutdown', { reason: 'SIGINT' });
-  saveRoomsSync();
-  process.exit(0);
-});
-
-// Idle room cleanup: remove rooms with no connections every 5 minutes
-const IDLE_ROOM_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [roomId, room] of rooms) {
-    if (room.connections.size === 0) {
-      const lastActive = roomLastActivity.get(roomId) ?? now;
-      if (now - lastActive > IDLE_ROOM_TIMEOUT_MS) {
-        deleteRoom(roomId);
-        log('room_idle_cleanup', { roomId });
-      }
-    } else {
-      roomLastActivity.set(roomId, now);
-    }
-  }
-  // Clean up expired invite tokens
-  for (const [token, data] of inviteTokens) {
-    if (now - data.createdAt > TOKEN_TTL_MS) {
-      inviteTokens.delete(token);
-    }
-  }
-  // Clean up stale rate limiter buckets
-  joinLimiter.cleanup();
-  chatLimiter.cleanup();
-  suggestionLimiter.cleanup();
-  cursorLimiter.cleanup();
-  activityLimiter.cleanup();
-}, 5 * 60 * 1000);
-
-
-wss.on('connection', (ws, request) => {
-  const ip = request.socket.remoteAddress ?? 'unknown';
-
-  // Per-IP connection limit
-  const ipConns = connectionsPerIp.get(ip) ?? 0;
-  if (ipConns >= MAX_CONNECTIONS_PER_IP) {
-    ws.close(1008, 'Too many connections from this IP');
+function installShutdownHandlers(): void {
+  if (sigtermHandler || sigintHandler) {
     return;
   }
-  connectionsPerIp.set(ip, ipConns + 1);
 
-  const context: ConnectionContext = { ws, userId: uuidv4(), ip };
+  sigtermHandler = () => {
+    log('server_shutdown', { reason: 'SIGTERM' });
+    saveRoomsSync();
+    process.exit(0);
+  };
+  sigintHandler = () => {
+    log('server_shutdown', { reason: 'SIGINT' });
+    saveRoomsSync();
+    process.exit(0);
+  };
 
-  ws.on('message', payload => {
-    try {
-      // Enforce hard payload size limit before unpacking
-      const byteLength = Buffer.isBuffer(payload)
-        ? payload.byteLength
-        : Array.isArray(payload)
-          ? payload.reduce((acc, b) => acc + b.byteLength, 0)
-          : Buffer.byteLength(payload.toString());
+  process.on('SIGTERM', sigtermHandler);
+  process.on('SIGINT', sigintHandler);
+}
 
-      if (byteLength > MAX_MESSAGE_BYTES) {
-        sendError(ws, 'Payload too large', 'PAYLOAD_TOO_LARGE');
+function uninstallShutdownHandlers(): void {
+  if (sigtermHandler) {
+    process.off('SIGTERM', sigtermHandler);
+    sigtermHandler = undefined;
+  }
+  if (sigintHandler) {
+    process.off('SIGINT', sigintHandler);
+    sigintHandler = undefined;
+  }
+}
+
+function startBackgroundTasks(idleRoomTimeoutMs: number): void {
+  clearBackgroundTasks();
+  autoSaveTimer = setInterval(() => {
+    void queueRoomSave?.();
+  }, DEFAULT_AUTO_SAVE_INTERVAL_MS);
+
+  cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [roomId, room] of rooms) {
+      if (room.connections.size === 0) {
+        const lastActive = roomLastActivity.get(roomId) ?? now;
+        if (now - lastActive > idleRoomTimeoutMs) {
+          deleteRoom(roomId);
+          log('room_idle_cleanup', { roomId });
+        }
+      } else {
+        roomLastActivity.set(roomId, now);
+      }
+    }
+    for (const [token, data] of inviteTokens) {
+      if (now - data.createdAt > TOKEN_TTL_MS) {
+        inviteTokens.delete(token);
+      }
+    }
+    joinLimiter.cleanup();
+    chatLimiter.cleanup();
+    suggestionLimiter.cleanup();
+    cursorLimiter.cleanup();
+    activityLimiter.cleanup();
+  }, DEFAULT_CLEANUP_INTERVAL_MS);
+}
+
+function attachConnectionHandlers(wss: WebSocketServer): void {
+  wss.on('connection', (ws, request) => {
+    const ip = request.socket.remoteAddress ?? 'unknown';
+
+    const ipConns = connectionsPerIp.get(ip) ?? 0;
+    if (ipConns >= MAX_CONNECTIONS_PER_IP) {
+      ws.close(1008, 'Too many connections from this IP');
+      return;
+    }
+    connectionsPerIp.set(ip, ipConns + 1);
+
+    const context: ConnectionContext = { ws, userId: uuidv4(), ip };
+
+    ws.on('message', payload => {
+      try {
+        const byteLength = Buffer.isBuffer(payload)
+          ? payload.byteLength
+          : Array.isArray(payload)
+            ? payload.reduce((acc, b) => acc + b.byteLength, 0)
+            : Buffer.byteLength(payload.toString());
+
+        if (byteLength > MAX_MESSAGE_BYTES) {
+          sendError(ws, 'Payload too large', 'PAYLOAD_TOO_LARGE');
+          return;
+        }
+
+        let message: unknown;
+        if (Buffer.isBuffer(payload) || payload instanceof Uint8Array || Array.isArray(payload)) {
+          message = unpack(payload as Buffer) as unknown;
+        } else {
+          message = JSON.parse(payload.toString()) as unknown;
+        }
+        handleMessage(context, message);
+      } catch (error) {
+        sendError(ws, 'Invalid payload received', 'PAYLOAD_INVALID');
+      }
+    });
+
+    ws.on('close', () => {
+      const conns = connectionsPerIp.get(ip) ?? 1;
+      if (conns <= 1) { connectionsPerIp.delete(ip); }
+      else { connectionsPerIp.set(ip, conns - 1); }
+      cleanupConnection(context);
+    });
+
+    const pingTimer = setInterval(() => {
+      if (ws.readyState === ws.OPEN) {
+        ws.ping();
+      } else {
+        clearInterval(pingTimer);
+      }
+    }, 30_000);
+
+    ws.on('close', () => clearInterval(pingTimer));
+  });
+}
+
+function waitForListening(target: WebSocketServer | https.Server): Promise<void> {
+  const address = 'address' in target ? target.address() : undefined;
+  if (address) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const onListening = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      target.off('listening', onListening);
+      target.off('error', onError);
+    };
+
+    target.on('listening', onListening);
+    target.on('error', onError);
+  });
+}
+
+function getResolvedPort(wss: WebSocketServer, fallbackPort: number): number {
+  const address = wss.address();
+  return typeof address === 'object' && address ? address.port : fallbackPort;
+}
+
+function closeWebSocketServer(wss: WebSocketServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    wss.close(error => {
+      if (error) {
+        reject(error);
         return;
       }
+      resolve();
+    });
+  });
+}
 
-      let message: unknown;
-      if (Buffer.isBuffer(payload) || payload instanceof Uint8Array || Array.isArray(payload)) {
-        message = unpack(payload as Buffer) as unknown;
-      } else {
-        message = JSON.parse(payload.toString()) as unknown;
+function closeHttpsServer(server: https.Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close(error => {
+      if (error) {
+        reject(error);
+        return;
       }
-      handleMessage(context, message);
-    } catch (error) {
-      sendError(ws, 'Invalid payload received', 'PAYLOAD_INVALID');
-    }
+      resolve();
+    });
   });
+}
 
-  ws.on('close', () => {
-    // Decrement per-IP connection counter
-    const conns = connectionsPerIp.get(ip) ?? 1;
-    if (conns <= 1) { connectionsPerIp.delete(ip); }
-    else { connectionsPerIp.set(ip, conns - 1); }
-    cleanupConnection(context);
-  });
+export async function stopCodeRoomsServer(): Promise<void> {
+  if (!activeWss) {
+    return;
+  }
 
-  // Server-side ping to detect dead connections
-  const pingTimer = setInterval(() => {
-    if (ws.readyState === ws.OPEN) {
-      ws.ping();
-    } else {
-      clearInterval(pingTimer);
-    }
-  }, 30_000);
+  clearBackgroundTasks();
+  uninstallShutdownHandlers();
 
-  ws.on('close', () => clearInterval(pingTimer));
-});
+  for (const client of activeWss.clients) {
+    client.terminate();
+  }
+
+  const currentWss = activeWss;
+  const currentHttpsServer = activeHttpsServer;
+  activeWss = undefined;
+  activeHttpsServer = undefined;
+
+  await closeWebSocketServer(currentWss);
+  if (currentHttpsServer) {
+    await closeHttpsServer(currentHttpsServer);
+  }
+
+  queueRoomSave = undefined;
+  resetInMemoryState();
+}
+
+export async function startCodeRoomsServer(options: StartCodeRoomsServerOptions = {}): Promise<StartedCodeRoomsServer> {
+  if (activeWss) {
+    throw new Error('CodeRooms server is already running in this process.');
+  }
+
+  resetInMemoryState();
+  backupDir = options.backupDir ?? DEFAULT_BACKUP_DIR;
+  backupFile = path.join(backupDir, 'rooms-backup.json');
+  persistRoomsEnabled = options.persistRooms ?? true;
+  loadPersistedRoomsEnabled = options.loadPersistedRooms ?? persistRoomsEnabled;
+  ensureBackupDirectory();
+  if (loadPersistedRoomsEnabled) {
+    loadRooms();
+  }
+  queueRoomSave = createQueueRoomSave();
+
+  const requestedPort = options.port ?? 5171;
+  const requestedHost = options.host ?? '127.0.0.1';
+  const tls = Boolean(options.certPath && options.keyPath);
+
+  if (tls) {
+    activeHttpsServer = https.createServer({
+      cert: fs.readFileSync(options.certPath!, 'utf-8'),
+      key: fs.readFileSync(options.keyPath!, 'utf-8')
+    });
+    activeWss = new WebSocketServer({ server: activeHttpsServer, maxPayload: MAX_MESSAGE_BYTES });
+    attachConnectionHandlers(activeWss);
+    activeHttpsServer.listen(requestedPort, requestedHost);
+    await waitForListening(activeHttpsServer);
+  } else {
+    activeWss = new WebSocketServer({ port: requestedPort, host: requestedHost, maxPayload: MAX_MESSAGE_BYTES });
+    attachConnectionHandlers(activeWss);
+    await waitForListening(activeWss);
+  }
+
+  if (options.enableBackgroundTasks ?? true) {
+    startBackgroundTasks(DEFAULT_IDLE_ROOM_TIMEOUT_MS);
+  }
+  if (options.installProcessHandlers ?? true) {
+    installShutdownHandlers();
+  }
+
+  const resolvedPort = getResolvedPort(activeWss, requestedPort);
+  log('server_listening', { host: requestedHost, port: resolvedPort, tls });
+  if (options.logToConsole) {
+    console.log(`CodeRooms server listening on ${tls ? 'wss' : 'ws'}://${requestedHost}:${resolvedPort}`);
+  }
+
+  return {
+    host: requestedHost,
+    port: resolvedPort,
+    tls,
+    close: () => stopCodeRoomsServer()
+  };
+}
 
 function handleMessage(context: ConnectionContext, message: unknown): void {
   if (!validateClientMessage(message)) {
@@ -1680,4 +1866,29 @@ function handleCursorUpdate(
     },
     context.ws
   );
+}
+
+if (!process.env.VITEST && require.main === module) {
+  const args = minimist(process.argv.slice(2), {
+    alias: { p: 'port', h: 'host' },
+    string: ['port', 'host', 'cert', 'key']
+  });
+  const fileConfig = loadConfig();
+  const port = Number(args.port ?? process.env.CODEROOMS_PORT ?? fileConfig.port ?? 5171);
+  const host = (args.host ?? process.env.CODEROOMS_HOST ?? fileConfig.host ?? '127.0.0.1') as string;
+  const certPath = args.cert ?? process.env.CODEROOMS_CERT ?? fileConfig.cert;
+  const keyPath = args.key ?? process.env.CODEROOMS_KEY ?? fileConfig.key;
+
+  void startCodeRoomsServer({
+    port,
+    host,
+    certPath,
+    keyPath,
+    logToConsole: true
+  }).catch(error => {
+    const message = error instanceof Error ? error.message : String(error);
+    log('server_start_error', { error: message });
+    console.error(`Failed to start CodeRooms server: ${message}`);
+    process.exit(1);
+  });
 }
