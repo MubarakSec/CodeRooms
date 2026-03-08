@@ -1,4 +1,4 @@
-import { Role } from '../connection/MessageTypes';
+import { Role, SuggestionReviewAction } from '../connection/MessageTypes';
 
 const ENCRYPTION_NOTICE = '🔒 **E2E Encryption active.** Chat messages are end-to-end encrypted with your room secret. Share the Room ID and secret separately.';
 
@@ -23,4 +23,55 @@ export function buildWelcomeMessage(role: Role, encrypted: boolean): string {
   }
 
   return welcomeText;
+}
+
+export function getJoinAccessDeniedNotice(): string {
+  return 'Unable to join room. Check the invite code, secret, or token and try again.';
+}
+
+export function getJoinAccessRetryActionLabel(): string {
+  return 'Retry with secret or token';
+}
+
+export function getDocumentResyncNotice(): string {
+  return 'Resyncing shared file due to patch mismatch.';
+}
+
+export function getOwnerUnavailableNotice(): string {
+  return 'The room owner is unavailable right now, so the file cannot resync yet.';
+}
+
+export function getRoomStateInvalidNotice(): string {
+  return 'This action no longer matches the active room state. Retry after rejoining or reopening the shared file.';
+}
+
+export function getRoomClosedNotice(): string {
+  return 'The room has been closed by the owner.';
+}
+
+export function getReconnectFailureNotice(): string {
+  return 'CodeRooms: unable to reconnect to the server after multiple attempts.';
+}
+
+export function buildSuggestionReviewSummary(args: {
+  action: SuggestionReviewAction;
+  reviewedCount: number;
+  alreadyReviewedCount: number;
+  conflictCount: number;
+  missingCount: number;
+}): string {
+  const actionLabel = args.action === 'accept' ? 'Accepted' : 'Rejected';
+  const parts = [`${actionLabel} ${args.reviewedCount} suggestion${args.reviewedCount === 1 ? '' : 's'}`];
+
+  if (args.alreadyReviewedCount > 0) {
+    parts.push(`${args.alreadyReviewedCount} already reviewed`);
+  }
+  if (args.conflictCount > 0) {
+    parts.push(`${args.conflictCount} conflicted`);
+  }
+  if (args.missingCount > 0) {
+    parts.push(`${args.missingCount} missing`);
+  }
+
+  return parts.join(' · ');
 }

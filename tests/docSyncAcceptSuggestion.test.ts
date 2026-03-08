@@ -74,7 +74,7 @@ vi.mock('vscode', () => {
 import { DocumentSync } from '../src/core/DocumentSync';
 
 describe('DocumentSync acceptSuggestion', () => {
-  it('applies patches locally and only sends acceptSuggestion once', async () => {
+  it('defers patch application to the server and only sends acceptSuggestion once', async () => {
     const sent: any[] = [];
     const sync = new DocumentSync(
       {
@@ -91,7 +91,7 @@ describe('DocumentSync acceptSuggestion', () => {
       (message) => sent.push(message)
     );
 
-    (sync as any).documents.set('d1', {
+    const tracked = {
       docId: 'd1',
       sharedDocument: {
         uri: { toString: () => 'file:///tmp/doc', fsPath: '/tmp/doc' },
@@ -101,7 +101,8 @@ describe('DocumentSync acceptSuggestion', () => {
       version: 5,
       lastSyncedText: 'original',
       pendingSnapshot: false
-    });
+    };
+    (sync as any).documents.set('d1', tracked);
     (sync as any).setActiveDocument = vi.fn(async () => {});
     applyResult = true;
 
@@ -128,6 +129,7 @@ describe('DocumentSync acceptSuggestion', () => {
     expect(sent).toEqual([
       { type: 'acceptSuggestion', roomId: 'room1', suggestionId: 's1' }
     ]);
-    expect((sync as any).documents.get('d1').version).toBe(7);
+    expect((sync as any).documents.get('d1')).toBe(tracked);
+    expect((sync as any).documents.get('d1').version).toBe(5);
   });
 });

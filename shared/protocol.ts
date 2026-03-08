@@ -21,6 +21,8 @@ export interface TextPatch {
   text: string;
 }
 
+export type SuggestionReviewAction = "accept" | "reject";
+
 export interface Suggestion {
   suggestionId: string;
   roomId: string;
@@ -30,6 +32,8 @@ export interface Suggestion {
   patches: TextPatch[];
   createdAt: number;
   status: "pending" | "accepted" | "rejected";
+  reviewedAt?: number;
+  reviewedById?: string;
 }
 
 export type ClientToServerMessage =
@@ -43,6 +47,7 @@ export type ClientToServerMessage =
   | { type: "suggestion"; roomId: string; docId: string; suggestionId: string; patches: TextPatch[]; authorId: string; authorName: string; createdAt: number }
   | { type: "acceptSuggestion"; roomId: string; suggestionId: string }
   | { type: "rejectSuggestion"; roomId: string; suggestionId: string }
+  | { type: "reviewSuggestions"; roomId: string; suggestionIds: string[]; action: SuggestionReviewAction }
   | { type: "setEditMode"; userId: string; direct: boolean }
   | { type: "requestFullSync"; roomId: string; docId: string }
   | { type: "fullDocumentSync"; roomId: string; docId: string; text: string; version: number }
@@ -69,6 +74,16 @@ export type ServerToClientMessage =
   | { type: "newSuggestion"; suggestion: Suggestion }
   | { type: "suggestionAccepted"; suggestionId: string; docId: string }
   | { type: "suggestionRejected"; suggestionId: string; docId: string }
+  | {
+      type: "suggestionsReviewed";
+      roomId: string;
+      action: SuggestionReviewAction;
+      requestedCount: number;
+      reviewedCount: number;
+      alreadyReviewedCount: number;
+      conflictCount: number;
+      missingCount: number;
+    }
   | { type: "rootCursor"; roomId: string; docId: string; uri: string; position: Position }
   | { type: "cursorUpdate"; roomId: string; userId?: string; userName?: string; docId: string; uri: string; position: Position; selections?: { start: Position; end: Position }[] }
   | { type: "participantActivity"; roomId: string; userId: string; activity: "typing" | "idle"; at: number }

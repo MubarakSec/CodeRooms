@@ -1,12 +1,14 @@
-import { ClientToServerMessage, Position, Role, RoomMode, TextPatch } from './types';
+import { ClientToServerMessage, Position, Role, RoomMode, SuggestionReviewAction, TextPatch } from './types';
 
 export const MAX_CURSOR_SELECTIONS = 20;
 export const MAX_DISPLAY_NAME_LENGTH = 50;
 export const MAX_PATCH_BATCH_LENGTH = 500;
+export const MAX_BULK_SUGGESTION_REVIEW_COUNT = 200;
 export const MAX_INVITE_LABEL_LENGTH = 80;
 export const MAX_LANGUAGE_ID_LENGTH = 128;
 export const MAX_ROOM_ID_LENGTH = 64;
 export const MAX_AUTH_FIELD_LENGTH = 128;
+export const MAX_PATCH_TEXT_LENGTH = 128 * 1024;
 export const MAX_SHARED_FILE_NAME_LENGTH = 255;
 export const MAX_SIMPLE_ID_LENGTH = 128;
 export const MAX_URI_LENGTH = 4096;
@@ -23,6 +25,10 @@ export function isRoleUpdateValue(value: unknown): value is Extract<Role, 'colla
   return value === 'collaborator' || value === 'viewer';
 }
 
+export function isSuggestionReviewAction(value: unknown): value is SuggestionReviewAction {
+  return value === 'accept' || value === 'reject';
+}
+
 export function isPosition(value: unknown): value is Position {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -32,6 +38,17 @@ export function isPosition(value: unknown): value is Position {
     && Number.isInteger(candidate.character)
     && Number(candidate.line) >= 0
     && Number(candidate.character) >= 0;
+}
+
+function comparePositions(left: Position, right: Position): number {
+  if (left.line !== right.line) {
+    return left.line - right.line;
+  }
+  return left.character - right.character;
+}
+
+function hasOrderedPositionRange(start: Position, end: Position): boolean {
+  return comparePositions(start, end) <= 0;
 }
 
 export function isCursorSelections(
@@ -48,7 +65,9 @@ export function isCursorSelections(
       return false;
     }
     const candidate = selection as Record<string, unknown>;
-    return isPosition(candidate.start) && isPosition(candidate.end);
+    return isPosition(candidate.start)
+      && isPosition(candidate.end)
+      && hasOrderedPositionRange(candidate.start, candidate.end);
   });
 }
 
@@ -77,14 +96,22 @@ export function isTextPatch(value: unknown): value is TextPatch {
     return false;
   }
   const candidate = value as Record<string, unknown>;
-  if (typeof candidate.text !== 'string') {
+  if (typeof candidate.text !== 'string' || candidate.text.length > MAX_PATCH_TEXT_LENGTH) {
     return false;
   }
   if (typeof candidate.range !== 'object' || candidate.range === null) {
     return false;
   }
   const range = candidate.range as Record<string, unknown>;
-  return isPosition(range.start) && isPosition(range.end);
+  return isPosition(range.start)
+    && isPosition(range.end)
+    && hasOrderedPositionRange(range.start, range.end);
+}
+
+function isBoundedStringArray(value: unknown, maxItems: number, maxItemLength: number): value is string[] {
+  return Array.isArray(value)
+    && value.length <= maxItems
+    && value.every(item => isNonEmptyBoundedString(item, maxItemLength));
 }
 
 export function isTextPatchArray(
@@ -161,6 +188,10 @@ export function validateClientMessage(msg: unknown): msg is ClientToServerMessag
     case 'rejectSuggestion':
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.suggestionId, MAX_SIMPLE_ID_LENGTH);
+    case 'reviewSuggestions':
+      return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
+        && isBoundedStringArray(m.suggestionIds, MAX_BULK_SUGGESTION_REVIEW_COUNT, MAX_SIMPLE_ID_LENGTH)
+        && isSuggestionReviewAction(m.action);
     case 'setEditMode':
       return isNonEmptyBoundedString(m.userId, MAX_SIMPLE_ID_LENGTH) && typeof m.direct === 'boolean';
     case 'requestFullSync':

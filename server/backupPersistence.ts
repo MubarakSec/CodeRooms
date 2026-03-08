@@ -56,6 +56,16 @@ export interface ParsedRoomsBackup {
   skippedRooms: number;
 }
 
+export interface AtomicBackupWriter {
+  writeFile(path: string, content: string): Promise<void>;
+  rename(fromPath: string, toPath: string): Promise<void>;
+}
+
+export interface AtomicBackupWriterSync {
+  writeFileSync(path: string, content: string): void;
+  renameSync(fromPath: string, toPath: string): void;
+}
+
 export function serializeRoomsBackup(rooms: Record<string, PersistedRoomState>, savedAt = Date.now()): string {
   const payload: RoomsBackupEnvelope = {
     version: ROOMS_BACKUP_VERSION,
@@ -103,6 +113,26 @@ export function parseRoomsBackup(raw: string): ParsedRoomsBackup {
 export function getCorruptBackupPath(backupFile: string, now = new Date()): string {
   const timestamp = now.toISOString().replace(/[:.]/g, '-');
   return path.join(path.dirname(backupFile), `${path.basename(backupFile)}.corrupt-${timestamp}`);
+}
+
+export async function writeRoomsBackupAtomically(
+  writer: AtomicBackupWriter,
+  backupFile: string,
+  serializedBackup: string
+): Promise<void> {
+  const tmpFile = `${backupFile}.tmp`;
+  await writer.writeFile(tmpFile, serializedBackup);
+  await writer.rename(tmpFile, backupFile);
+}
+
+export function writeRoomsBackupAtomicallySync(
+  writer: AtomicBackupWriterSync,
+  backupFile: string,
+  serializedBackup: string
+): void {
+  const tmpFile = `${backupFile}.tmp`;
+  writer.writeFileSync(tmpFile, serializedBackup);
+  writer.renameSync(tmpFile, backupFile);
 }
 
 function isPersistedRoomState(value: unknown, roomId: string): value is PersistedRoomState {

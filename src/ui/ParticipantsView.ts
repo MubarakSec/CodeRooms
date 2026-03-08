@@ -90,12 +90,16 @@ class DocumentItem extends vscode.TreeItem {
     label: string,
     description: string | undefined,
     isActive: boolean,
-    isRoot: boolean
+    isRoot: boolean,
+    isPending = false
   ) {
     super(label, vscode.TreeItemCollapsibleState.None);
     const descParts = [];
     if (isActive) {
       descParts.push('active');
+    }
+    if (isPending) {
+      descParts.push('sharing...');
     }
     if (description) {
       descParts.push(description);
@@ -321,7 +325,7 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
       for (const doc of docs) {
         const label = doc.fileName ?? 'Shared file';
         const description = doc.uri ? describeLocation(doc.uri) : undefined;
-        items.push(new DocumentItem(doc.docId, label, description, doc.isActive, this.roomState.isRoot()));
+        items.push(new DocumentItem(doc.docId, label, description, doc.isActive, this.roomState.isRoot(), Boolean(doc.isPending)));
       }
 
       if (this.roomState.isRoot()) {
@@ -407,6 +411,7 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
       return [new InfoItem('Review queue is clear', 'New suggestions will stay here until reviewed.', new vscode.ThemeIcon('check'))];
     }
     const items: vscode.TreeItem[] = suggestions.map(suggestion => new SuggestionItem(suggestion, this.documentSync.getDocumentUri(suggestion.docId)));
+    items.push(new ActionItem('Accept all pending', 'coderooms.acceptPendingSuggestions', [], new vscode.ThemeIcon('pass')));
     items.push(new ActionItem('Reject all pending', 'coderooms.clearPendingSuggestions', [], new vscode.ThemeIcon('trash')));
     return items;
   }

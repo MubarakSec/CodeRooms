@@ -1,6 +1,6 @@
 import { applyPatch } from './patch';
 import { VersionedPatch } from './ot';
-import { ClientToServerMessage, Participant, Role, Suggestion, TextPatch } from './types';
+import { ClientToServerMessage, Participant, Role, Suggestion, SuggestionReviewAction, TextPatch } from './types';
 
 export interface SuggestionParticipant extends Participant {
   isDirectEditMode?: boolean;
@@ -23,6 +23,51 @@ export function createPendingSuggestion(message: SuggestionMessage, participant:
     createdAt: message.createdAt,
     status: 'pending'
   };
+}
+
+export function isIdempotentSuggestionReplay(
+  existing: Suggestion,
+  message: SuggestionMessage,
+  participant: SuggestionParticipant
+): boolean {
+  return existing.status === 'pending'
+    && existing.roomId === message.roomId
+    && existing.docId === message.docId
+    && existing.authorId === participant.userId
+    && existing.authorName === participant.displayName
+    && existing.createdAt === message.createdAt
+    && JSON.stringify(existing.patches) === JSON.stringify(message.patches);
+}
+
+export function transitionSuggestionStatus(
+  suggestion: Suggestion,
+  action: SuggestionReviewAction,
+  reviewedById: string,
+  reviewedAt = Date.now()
+): Suggestion {
+  return {
+    ...suggestion,
+    status: action === 'accept' ? 'accepted' : 'rejected',
+    reviewedById,
+    reviewedAt
+  };
+}
+
+export function pruneReviewedSuggestions(
+  suggestions: Map<string, Suggestion>,
+  maxReviewedSuggestions: number
+): void {
+  const reviewed = Array.from(suggestions.values())
+    .filter(suggestion => suggestion.status !== 'pending')
+    .sort((left, right) => (left.reviewedAt ?? left.createdAt) - (right.reviewedAt ?? right.createdAt));
+
+  if (reviewed.length <= maxReviewedSuggestions) {
+    return;
+  }
+
+  for (const suggestion of reviewed.slice(0, reviewed.length - maxReviewedSuggestions)) {
+    suggestions.delete(suggestion.suggestionId);
+  }
 }
 
 export function applySuggestionPatches(

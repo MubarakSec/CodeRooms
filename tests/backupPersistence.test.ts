@@ -3,7 +3,9 @@ import {
   getCorruptBackupPath,
   parseRoomsBackup,
   ROOMS_BACKUP_VERSION,
-  serializeRoomsBackup
+  serializeRoomsBackup,
+  writeRoomsBackupAtomically,
+  writeRoomsBackupAtomicallySync
 } from '../server/backupPersistence';
 
 const persistedRoom = {
@@ -57,5 +59,87 @@ describe('backup persistence helpers', () => {
   it('builds a deterministic corrupt-backup quarantine path', () => {
     const corruptPath = getCorruptBackupPath('/tmp/rooms-backup.json', new Date('2026-03-08T11:10:00.000Z'));
     expect(corruptPath).toBe('/tmp/rooms-backup.json.corrupt-2026-03-08T11-10-00-000Z');
+  });
+
+  it('rejects corrupted backup JSON', () => {
+    expect(() => parseRoomsBackup('{not valid json')).toThrow();
+  });
+
+  it('writes backups atomically through a temp file and rename', async () => {
+    const calls: string[] = [];
+
+    await writeRoomsBackupAtomically(
+      {
+        writeFile: async (filePath: string) => {
+          calls.push(`write:${filePath}`);
+        },
+        rename: async (fromPath: string, toPath: string) => {
+          calls.push(`rename:${fromPath}->${toPath}`);
+        }
+      },
+      '/tmp/rooms-backup.json',
+      'payload'
+    );
+
+    expect(calls).toEqual([
+      'write:/tmp/rooms-backup.json.tmp',
+      'rename:/tmp/rooms-backup.json.tmp->/tmp/rooms-backup.json'
+    ]);
+  });
+
+  it('surfaces async write and rename failures from the atomic backup path', async () => {
+    await expect(
+      writeRoomsBackupAtomically(
+        {
+          writeFile: async () => {
+            throw new Error('write failed');
+          },
+          rename: async () => {}
+        },
+        '/tmp/rooms-backup.json',
+        'payload'
+      )
+    ).rejects.toThrow('write failed');
+
+    await expect(
+      writeRoomsBackupAtomically(
+        {
+          writeFile: async () => {},
+          rename: async () => {
+            throw new Error('rename failed');
+          }
+        },
+        '/tmp/rooms-backup.json',
+        'payload'
+      )
+    ).rejects.toThrow('rename failed');
+  });
+
+  it('surfaces sync write and rename failures from the atomic backup path', () => {
+    expect(() =>
+      writeRoomsBackupAtomicallySync(
+        {
+          writeFileSync: () => {
+            throw new Error('sync write failed');
+          },
+          renameSync: () => {}
+        },
+        '/tmp/rooms-backup.json',
+        'payload'
+      )
+    ).toThrow('sync write failed');
+
+    expect(() =>
+      writeRoomsBackupAtomicallySync(
+        {
+          writeFileSync: () => {},
+          renameSync: () => {
+            throw new Error('sync rename failed');
+          }
+        },
+        '/tmp/rooms-backup.json',
+        'payload'
+      )
+    ).toThrow('sync rename failed');
   });
 });

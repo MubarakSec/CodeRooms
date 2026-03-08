@@ -88,16 +88,17 @@ export class ChatView implements vscode.WebviewViewProvider {
         color-scheme: light dark;
         --bg: var(--vscode-sideBar-background);
         --panel: rgba(255,255,255,0.02);
-        --border: rgba(128,128,128,0.2);
+        --border: var(--vscode-panel-border, rgba(128,128,128,0.24));
+        --border-strong: var(--vscode-contrastBorder, var(--border));
         --bubble: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-button-background) 8%);
         --bubble-accent: color-mix(in srgb, var(--vscode-button-background) 35%, var(--vscode-editor-background) 65%);
         --bubble-self: color-mix(in srgb, var(--vscode-button-background) 18%, var(--vscode-editor-background) 82%);
         --system-bg: rgba(128,128,128,0.08);
         --system-border: rgba(128,128,128,0.15);
         --text-dim: rgba(128,128,128,0.7);
-        --avatar-root: #e8a830;
-        --avatar-collab: #4c9ce8;
-        --avatar-viewer: #888;
+        --avatar-root: var(--vscode-charts-yellow, #c69300);
+        --avatar-collab: var(--vscode-charts-blue, #2f81f7);
+        --avatar-viewer: var(--vscode-descriptionForeground, #888);
         --hover-bg: rgba(128,128,128,0.06);
         --link-color: var(--vscode-textLink-foreground);
       }
@@ -145,7 +146,14 @@ export class ChatView implements vscode.WebviewViewProvider {
       /* Messages */
       .messages {
         flex: 1; padding: 8px 10px; overflow-y: auto;
-        display: flex; flex-direction: column; gap: 2px;
+      }
+      .message-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
       }
       .messages::-webkit-scrollbar { width: 6px; }
       .messages::-webkit-scrollbar-track { background: transparent; }
@@ -177,8 +185,9 @@ export class ChatView implements vscode.WebviewViewProvider {
       .chat-row {
         display: flex; gap: 8px; padding: 6px 4px;
         border-radius: 8px; transition: background 0.1s;
+        border: 1px solid transparent;
       }
-      .chat-row:hover { background: var(--hover-bg); }
+      .chat-row:hover { background: var(--hover-bg); border-color: var(--border-strong); }
 
       .avatar {
         width: 30px; height: 30px; border-radius: 50%;
@@ -264,13 +273,18 @@ export class ChatView implements vscode.WebviewViewProvider {
       .send-btn:active { transform: scale(0.95); }
       .send-btn:disabled { opacity: 0.4; cursor: default; transform: none; }
       .send-btn svg { width: 16px; height: 16px; fill: currentColor; }
+      .send-btn:focus-visible,
+      .scroll-anchor:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder);
+        outline-offset: 2px;
+      }
 
       /* Scroll-to-bottom button */
       .scroll-anchor {
         position: sticky; bottom: 0; align-self: center;
         background: var(--vscode-button-background);
         color: var(--vscode-button-foreground);
-        border: none; border-radius: 50%;
+        border: 1px solid var(--border-strong); border-radius: 50%;
         width: 28px; height: 28px;
         cursor: pointer; display: none;
         align-items: center; justify-content: center;
@@ -279,12 +293,19 @@ export class ChatView implements vscode.WebviewViewProvider {
         font-size: 14px;
       }
       .scroll-anchor.visible { display: flex; }
+      .sr-only {
+        position: absolute !important;
+        width: 1px; height: 1px;
+        padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0);
+        white-space: nowrap; border: 0;
+      }
     </style>
   </head>
   <body>
     <div class="wrapper">
       <div class="chat-header">
-        <div class="chat-title">Room Chat</div>
+        <div id="chatTitle" class="chat-title">Room Chat</div>
         <div class="chat-hint">Enter to send. Shift+Enter adds a new line.</div>
       </div>
       <div id="empty" class="empty-state">
@@ -292,7 +313,9 @@ export class ChatView implements vscode.WebviewViewProvider {
         <div class="title">Session chat is quiet</div>
         <div class="subtitle">Messages from the room will appear here as soon as someone speaks up.</div>
       </div>
-      <div id="messages" class="messages" style="display:none;" role="log" aria-live="polite" aria-label="CodeRooms chat messages"></div>
+      <div id="messagesPanel" class="messages" style="display:none;" role="log" aria-live="polite" aria-labelledby="chatTitle">
+        <ol id="messageList" class="message-list" aria-label="CodeRooms chat transcript"></ol>
+      </div>
       <button id="scrollBtn" class="scroll-anchor" title="Scroll to bottom" aria-label="Scroll chat to the latest messages">\u2193</button>
       <form id="composer" class="composer">
         <textarea id="input" class="input" rows="1" placeholder="Message the room\u2026" aria-label="Message the room"></textarea>
@@ -303,7 +326,8 @@ export class ChatView implements vscode.WebviewViewProvider {
     </div>
     <script nonce="${nonce}">
       const vscode = acquireVsCodeApi();
-      const list = document.getElementById('messages');
+      const panel = document.getElementById('messagesPanel');
+      const list = document.getElementById('messageList');
       const empty = document.getElementById('empty');
       const form = document.getElementById('composer');
       const input = document.getElementById('input');
@@ -349,7 +373,7 @@ export class ChatView implements vscode.WebviewViewProvider {
 
         const hasMessages = append ? list.children.length > 0 || messages.length > 0 : messages.length > 0;
         empty.style.display = hasMessages ? 'none' : '';
-        list.style.display = hasMessages ? '' : 'none';
+        panel.style.display = hasMessages ? '' : 'none';
         const fragment = document.createDocumentFragment();
 
         (messages || []).forEach(msg => {
@@ -358,17 +382,18 @@ export class ChatView implements vscode.WebviewViewProvider {
           if (msgDate && msgDate !== lastDate) {
             lastDate = msgDate;
             lastAuthor = '';
-            const divider = document.createElement('div');
+            const divider = document.createElement('li');
             divider.className = 'date-divider';
             divider.textContent = msgDate;
             fragment.appendChild(divider);
           }
 
           if (msg.isSystem) {
-            const sysRow = document.createElement('div');
+            const sysRow = document.createElement('li');
             sysRow.className = 'system-row';
+            sysRow.setAttribute('role', 'status');
             sysRow.innerHTML =
-              '<span class="sys-icon">\u2139\ufe0f</span>' +
+              '<span class="sys-icon" aria-hidden="true">\u2139\ufe0f</span>' +
               '<span>' + escapeHtml(msg.content) + '</span>' +
               '<span class="sys-time">' + formatTime(msg.timestamp) + '</span>';
             fragment.appendChild(sysRow);
@@ -380,12 +405,14 @@ export class ChatView implements vscode.WebviewViewProvider {
           const sameAuthor = msg.fromUserId === lastAuthor;
           const withinGroup = sameAuthor && (msg.timestamp - lastTime < 120000);
 
-          const row = document.createElement('div');
+          const row = document.createElement('li');
           row.className = 'chat-row' + (withinGroup ? ' grouped' : '');
+          row.setAttribute('aria-label', msg.fromName + ', ' + (msg.role || 'viewer') + ', ' + formatTime(msg.timestamp));
 
           const avatar = document.createElement('div');
           avatar.className = 'avatar ' + (msg.role || 'viewer');
           avatar.textContent = initial(msg.fromName);
+          avatar.setAttribute('aria-hidden', 'true');
           row.appendChild(avatar);
 
           const body = document.createElement('div');
@@ -427,7 +454,7 @@ export class ChatView implements vscode.WebviewViewProvider {
         }
 
         if (autoScroll) {
-          list.scrollTop = list.scrollHeight;
+          panel.scrollTop = panel.scrollHeight;
         }
       }
 
@@ -438,15 +465,15 @@ export class ChatView implements vscode.WebviewViewProvider {
       }
 
       // Auto-scroll detection
-      list.addEventListener('scroll', () => {
+      panel.addEventListener('scroll', () => {
         const threshold = 60;
-        const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < threshold;
+        const atBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < threshold;
         autoScroll = atBottom;
         scrollBtn.classList.toggle('visible', !atBottom);
       });
 
       scrollBtn.addEventListener('click', () => {
-        list.scrollTop = list.scrollHeight;
+        panel.scrollTop = panel.scrollHeight;
         autoScroll = true;
         scrollBtn.classList.remove('visible');
       });

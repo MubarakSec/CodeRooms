@@ -61,6 +61,10 @@ export class SuggestionManager {
     return Array.from(this.suggestions.values());
   }
 
+  getPendingSuggestionIds(): string[] {
+    return Array.from(this.suggestions.keys());
+  }
+
   replaceAll(suggestions: Suggestion[]): void {
     this.suggestions.clear();
     for (const suggestion of suggestions) {

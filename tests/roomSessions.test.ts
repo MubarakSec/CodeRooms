@@ -78,6 +78,43 @@ describe('server room session helpers', () => {
     expect(resolved.participant.sessionToken).toBe('collab-session');
   });
 
+  it('restores an owner-led room and lets the owner reclaim it without reviving stale participants', () => {
+    const restored = restoreSessionState({
+      ownerSessionToken: 'owner-session',
+      recoverableSessions: [[
+        'collab-session',
+        {
+          sessionToken: 'collab-session',
+          displayName: 'Casey',
+          role: 'collaborator',
+          isDirectEditMode: false
+        }
+      ]]
+    });
+
+    const resolved = resolveJoinParticipant({
+      userId: 'socket-owner-new',
+      displayName: 'Owner',
+      mode: 'team',
+      activeParticipantCount: 1,
+      ownerSessionToken: 'owner-session',
+      activeParticipants: [{
+        userId: 'socket-collab-live',
+        displayName: 'Casey',
+        role: 'collaborator',
+        isDirectEditMode: false,
+        sessionToken: 'collab-session'
+      }],
+      recoverableSessions: restored.recoverableSessions,
+      requestedSessionToken: 'owner-session'
+    });
+
+    expect(restored.recoverableSessions.size).toBe(1);
+    expect(resolved.participant.role).toBe('root');
+    expect(resolved.participant.sessionToken).toBe('owner-session');
+    expect(resolved.previousUserId).toBeUndefined();
+  });
+
   it('does not expose session tokens in public participant payloads', () => {
     const publicParticipant = toPublicParticipant({
       userId: 'socket-1',

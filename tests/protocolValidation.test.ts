@@ -10,9 +10,11 @@ import {
   isRoleUpdateValue,
   isRoomMode,
   isSafeTimestamp,
+  isSuggestionReviewAction,
   isTextPatch,
   isTextPatchArray,
   validateClientMessage,
+  MAX_PATCH_TEXT_LENGTH,
   MAX_CURSOR_SELECTIONS,
   MAX_DISPLAY_NAME_LENGTH,
   MAX_AUTH_FIELD_LENGTH,
@@ -38,6 +40,12 @@ describe('protocol validation helpers', () => {
     expect(isParticipantActivity('streaming')).toBe(false);
   });
 
+  it('accepts only supported suggestion review actions', () => {
+    expect(isSuggestionReviewAction('accept')).toBe(true);
+    expect(isSuggestionReviewAction('reject')).toBe(true);
+    expect(isSuggestionReviewAction('dismiss')).toBe(false);
+  });
+
   it('validates positions, patch shapes, timestamps, and cursor selection caps', () => {
     expect(isPosition({ line: 2, character: 8 })).toBe(true);
     expect(isPosition({ line: -1, character: 0 })).toBe(false);
@@ -50,6 +58,20 @@ describe('protocol validation helpers', () => {
       text: 'X'
     })).toBe(true);
     expect(isTextPatch({ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } })).toBe(false);
+    expect(isTextPatch({
+      range: {
+        start: { line: 2, character: 0 },
+        end: { line: 1, character: 5 }
+      },
+      text: 'X'
+    })).toBe(false);
+    expect(isTextPatch({
+      range: {
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 0 }
+      },
+      text: 'x'.repeat(MAX_PATCH_TEXT_LENGTH + 1)
+    })).toBe(false);
     expect(isTextPatchArray([{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, text: 'X' }])).toBe(true);
     expect(isTextPatchArray([])).toBe(false);
     expect(isSafeTimestamp(Date.now())).toBe(true);
@@ -126,6 +148,13 @@ describe('protocol validation helpers', () => {
       authorName: 'Bob',
       createdAt: Date.now()
     })).toBe(true);
+
+    expect(validateClientMessage({
+      type: 'reviewSuggestions',
+      roomId: 'ROOM42',
+      suggestionIds: ['s-1', 's-2'],
+      action: 'reject'
+    })).toBe(true);
   });
 
   it('rejects malformed or abusive client message shapes', () => {
@@ -168,6 +197,20 @@ describe('protocol validation helpers', () => {
     })).toBe(false);
 
     expect(validateClientMessage({
+      type: 'docChange',
+      roomId: 'ROOM42',
+      docId: 'doc-1',
+      version: 1,
+      patch: {
+        range: {
+          start: { line: 2, character: 1 },
+          end: { line: 1, character: 0 }
+        },
+        text: 'hello'
+      }
+    })).toBe(false);
+
+    expect(validateClientMessage({
       type: 'cursorUpdate',
       roomId: 'ROOM42',
       userId: 'user-2',
@@ -176,6 +219,13 @@ describe('protocol validation helpers', () => {
       uri: 'file:///tmp/doc.ts',
       position: { line: 0, character: 1 },
       selections: []
+    })).toBe(false);
+
+    expect(validateClientMessage({
+      type: 'reviewSuggestions',
+      roomId: 'ROOM42',
+      suggestionIds: ['s-1', '   '],
+      action: 'accept'
     })).toBe(false);
   });
 });

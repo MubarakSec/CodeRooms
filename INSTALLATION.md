@@ -117,6 +117,12 @@ Or in VS Code: **Extensions panel → ··· menu → Install from VSIX…**
 
 ## 7. Running the Server in Production
 
+### Supported Deployment Model
+
+- Local-only development: `ws://127.0.0.1:5171` is fine.
+- Remote/shared deployment: use `wss://` with TLS enabled directly in CodeRooms or terminated at a reverse proxy.
+- Plain remote `ws://`: treat as trusted-network-only, not the recommended production posture.
+
 ### Basic (no TLS)
 
 ```bash

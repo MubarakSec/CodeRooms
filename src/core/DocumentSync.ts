@@ -6,6 +6,7 @@ import { ClientToServerMessage, Position, ServerToClientMessage, Suggestion, Tex
 import { RoomState } from './RoomState';
 import { RoomStorage } from './RoomStorage';
 import { logger } from '../util/logger';
+import { getDocumentResyncNotice } from '../util/roomNotices';
 
 type ShareDocumentMessage = Extract<ServerToClientMessage, { type: 'shareDocument' }>;
 type FullDocumentSyncMessage = Extract<ServerToClientMessage, { type: 'fullDocumentSync' }>;
@@ -26,6 +27,7 @@ interface TrackedDocument {
 export class DocumentSync {
   private readonly documents = new Map<string, TrackedDocument>();
   private activeDocumentId?: string;
+  private focusedDocumentId?: string;
   private suppressChanges = false;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly sharedDocEmitter = new vscode.EventEmitter<void>();
@@ -38,6 +40,17 @@ export class DocumentSync {
   private readonly pendingDocFlush = new Map<string, NodeJS.Timeout>();
   private readonly flushDelayMs = 45;
   private readonly pendingDocChanges = new Map<string, vscode.TextDocumentContentChangeEvent[]>();
+  private readonly pendingShareDocs = new Map<string, {
+    docId: string;
+    uri: vscode.Uri;
+    sharedDocument: vscode.TextDocument;
+    fileName?: string;
+    languageId?: string;
+  }>();
+  private readonly pendingFullSyncs = new Map<string, FullDocumentSyncMessage>();
+  private readonly pendingSnapshotTimers = new Map<string, NodeJS.Timeout>();
+  private readonly pendingUnshares = new Set<string>();
+  private readonly pendingSnapshotTimeoutMs = 5000;
   private lastUnsharedEditWarning = 0;
 
   readonly onDidChangeSharedDocument = this.sharedDocEmitter.event;
@@ -77,6 +90,15 @@ export class DocumentSync {
       return;
     }
 
+    const existingPendingShare = Array.from(this.pendingShareDocs.values()).find(candidate => this.uriKey(candidate.uri) === this.uriKey(document.uri));
+    if (existingPendingShare) {
+      this.updateActiveDocumentState(existingPendingShare.docId);
+      this.updateFocusedDocumentState(existingPendingShare.docId);
+      this.emitSharedDocChanged();
+      void vscode.window.showInformationMessage('This file is already waiting to be shared.');
+      return;
+    }
+
     const docId = uuidv4();
     const text = document.getText();
     const tracked: TrackedDocument = {
@@ -90,10 +112,18 @@ export class DocumentSync {
       languageId: document.languageId
     };
 
-    this.documents.set(docId, tracked);
+    this.pendingShareDocs.set(docId, {
+      docId,
+      uri: document.uri,
+      sharedDocument: document,
+      fileName: tracked.fileName,
+      languageId: document.languageId
+    });
     this.activeDocumentId = docId;
+    this.focusedDocumentId = docId;
     this.currentRoomId = roomId;
     this.registerLocalMapping(docId, document.uri);
+    this.roomState.setActiveSharedDocLabel(tracked.fileName);
 
     this.sendMessage({
       type: 'shareDocument',
@@ -111,13 +141,17 @@ export class DocumentSync {
 
   unshareDocument(targetDocId?: string): void {
     const roomId = this.roomState.getRoomId();
-    const docId = targetDocId ?? this.getActiveDocumentId();
+    const docId = targetDocId ?? this.getActiveDocumentId() ?? this.getFocusedDocumentId();
     if (!roomId || !docId) {
       void vscode.window.showWarningMessage('No shared document to unshare.');
       return;
     }
+    if (this.pendingUnshares.has(docId)) {
+      return;
+    }
+    this.pendingUnshares.add(docId);
     this.sendMessage({ type: 'unshareDocument', roomId, documentId: docId });
-    this.removeTrackedDocument(docId);
+    this.emitSharedDocChanged();
   }
 
   stopSharing(): void {
@@ -125,17 +159,22 @@ export class DocumentSync {
     this.remoteToLocal.clear();
     this.localToRemote.clear();
     this.activeDocumentId = undefined;
+    this.focusedDocumentId = undefined;
     this.currentRoomId = undefined;
     this.pendingDocChanges.clear();
     this.pendingDocFlush.forEach(timer => clearTimeout(timer));
     this.pendingDocFlush.clear();
+    this.pendingShareDocs.clear();
+    this.pendingFullSyncs.clear();
+    this.pendingSnapshotTimers.forEach(timer => clearTimeout(timer));
+    this.pendingSnapshotTimers.clear();
+    this.pendingUnshares.clear();
     this.roomState.setActiveSharedDocLabel(undefined);
     this.emitSharedDocChanged();
   }
 
   getSharedDocumentUri(): vscode.Uri | undefined {
-    const active = this.getActiveDocumentState();
-    return active?.uri;
+    return this.getFocusedSharedDocumentUri() ?? this.getActiveDocumentState()?.uri;
   }
 
   isSharing(): boolean {
@@ -146,26 +185,65 @@ export class DocumentSync {
     if (this.activeDocumentId && this.documents.has(this.activeDocumentId)) {
       return this.activeDocumentId;
     }
+    if (this.activeDocumentId && this.pendingShareDocs.has(this.activeDocumentId)) {
+      return this.activeDocumentId;
+    }
     this.activeDocumentId = undefined;
     const first = this.documents.values().next().value as TrackedDocument | undefined;
-    return first?.docId;
+    if (first) {
+      return first.docId;
+    }
+    return this.pendingShareDocs.values().next().value?.docId;
   }
 
-  getSharedDocuments(): Array<{ docId: string; uri?: vscode.Uri; fileName?: string; isActive: boolean }> {
+  getFocusedDocumentId(): string | undefined {
+    if (this.focusedDocumentId && (this.documents.has(this.focusedDocumentId) || this.pendingShareDocs.has(this.focusedDocumentId))) {
+      return this.focusedDocumentId;
+    }
+    this.focusedDocumentId = undefined;
+    return undefined;
+  }
+
+  getFocusedSharedDocumentUri(): vscode.Uri | undefined {
+    const focusedId = this.getFocusedDocumentId();
+    if (!focusedId) {
+      return undefined;
+    }
+    return this.documents.get(focusedId)?.uri ?? this.pendingShareDocs.get(focusedId)?.uri;
+  }
+
+  getSharedDocuments(): Array<{ docId: string; uri?: vscode.Uri; fileName?: string; isActive: boolean; isPending?: boolean }> {
     const active = this.getActiveDocumentId();
-    return Array.from(this.documents.values()).map(doc => ({
+    const shared = Array.from(this.documents.values()).map(doc => ({
       docId: doc.docId,
       uri: doc.uri,
       fileName: doc.fileName ?? (doc.uri ? this.fileNameFromUri(doc.uri) : undefined),
       isActive: doc.docId === active
     }));
+    const pending = Array.from(this.pendingShareDocs.values())
+      .filter(doc => !this.documents.has(doc.docId))
+      .map(doc => ({
+        docId: doc.docId,
+        uri: doc.uri,
+        fileName: doc.fileName ?? this.fileNameFromUri(doc.uri),
+        isActive: doc.docId === active,
+        isPending: true
+      }));
+    return shared.concat(pending);
   }
 
   async setActiveDocument(docId: string, reveal = true): Promise<void> {
-    if (!this.documents.has(docId)) {
+    if (!this.documents.has(docId) && !this.pendingShareDocs.has(docId)) {
       return;
     }
     this.updateActiveDocumentState(docId);
+    if (this.pendingShareDocs.has(docId)) {
+      if (reveal) {
+        await vscode.window.showTextDocument(this.pendingShareDocs.get(docId)!.sharedDocument, { preview: false });
+      }
+      this.emitSharedDocChanged();
+      return;
+    }
     await this.ensureDocumentIsOpen(docId, reveal);
     this.emitSharedDocChanged();
   }
@@ -175,10 +253,10 @@ export class DocumentSync {
       return;
     }
     const docId = this.localToRemote.get(this.uriKey(editor.document.uri));
-    if (!docId || !this.documents.has(docId)) {
+    if (!docId || (!this.documents.has(docId) && !this.pendingShareDocs.has(docId))) {
       return;
     }
-    this.updateActiveDocumentState(docId, true);
+    this.updateFocusedDocumentState(docId, true);
   }
 
   hasPendingSuggestion(docId?: string): boolean {
@@ -280,7 +358,8 @@ export class DocumentSync {
     this.currentRoomId = message.roomId;
     try {
       await this.storage.prepare();
-      const { uri } = await this.storage.registerDocument(
+      const pendingShare = this.pendingShareDocs.get(message.docId);
+      const { uri: storageUri } = await this.storage.registerDocument(
         message.roomId,
         message.docId,
         message.fileName,
@@ -291,25 +370,37 @@ export class DocumentSync {
 
       const tracked: TrackedDocument = {
         docId: message.docId,
-        uri,
+        uri: pendingShare?.uri ?? storageUri,
         version: message.version,
         lastSyncedText: message.text,
         pendingSnapshot: false,
         fileName: message.fileName,
-        languageId: message.languageId
+        languageId: message.languageId,
+        sharedDocument: pendingShare?.sharedDocument
       };
 
       this.documents.set(message.docId, tracked);
-      this.registerLocalMapping(message.docId, uri);
+      this.pendingShareDocs.delete(message.docId);
+      this.pendingUnshares.delete(message.docId);
+      this.registerLocalMapping(message.docId, tracked.uri ?? storageUri);
 
       const shouldReveal = !this.activeDocumentId || isNewRoom;
       if (!this.activeDocumentId) {
         this.activeDocumentId = message.docId;
       }
-      if (shouldReveal) {
+      if (shouldReveal && !pendingShare) {
         await this.setActiveDocument(message.docId, true);
+      } else {
+        this.updateRoomDocumentLabel();
       }
 
+      await this.applyPendingFullSync(message.docId);
+      if ((this.pendingDocChanges.get(message.docId)?.length ?? 0) > 0) {
+        this.scheduleFlush(message.docId);
+      }
+      if (this.pendingUnshares.has(message.docId)) {
+        this.unshareDocument(message.docId);
+      }
       this.emitSharedDocChanged();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -324,11 +415,13 @@ export class DocumentSync {
 
   async handleRequestFullSync(message: RequestFullSyncMessage): Promise<void> {
     if (!this.roomState.isRoot()) {
+      logger.warn('Ignoring full sync request because the local client is not the room owner.');
       return;
     }
     const roomId = this.roomState.getRoomId();
     const tracked = this.documents.get(message.docId);
     if (!roomId || !tracked) {
+      logger.warn(`Unable to fulfill full sync request for docId=${message.docId}: missing room or tracked document.`);
       return;
     }
     await this.ensureDocumentIsOpen(message.docId, false);
@@ -347,6 +440,8 @@ export class DocumentSync {
   }
 
   async handleDocumentUnshared(message: DocumentUnsharedMessage): Promise<void> {
+    this.pendingUnshares.delete(message.documentId);
+    this.pendingShareDocs.delete(message.documentId);
     this.removeTrackedDocument(message.documentId);
   }
 
@@ -354,6 +449,7 @@ export class DocumentSync {
     const tracked = this.documents.get(docId);
     if (!tracked) {
       logger.warn(`Received change for unknown document ${docId}`);
+      this.requestFullSyncForDoc(docId);
       return;
     }
 
@@ -361,6 +457,7 @@ export class DocumentSync {
     const document = tracked.sharedDocument;
     if (!document) {
       logger.warn(`Unable to apply patch for docId=${docId}: document not loaded.`);
+      this.requestFullSyncForDoc(docId);
       return;
     }
 
@@ -396,7 +493,7 @@ export class DocumentSync {
       applied = await this.applyPatch(document, patch);
       if (!applied) {
         this.requestFullSyncForDoc(docId);
-        void vscode.window.showWarningMessage('Resyncing shared file due to patch mismatch.', 'Retry now').then(action => {
+        void vscode.window.showWarningMessage(getDocumentResyncNotice(), 'Retry now').then(action => {
           if (action === 'Retry now') {
             const roomId = this.getEffectiveRoomId();
             if (!roomId) {
@@ -429,6 +526,8 @@ export class DocumentSync {
     await this.ensureDocumentIsOpen(docId, docId === this.activeDocumentId);
     const document = tracked.sharedDocument;
     if (!document) {
+      this.pendingFullSyncs.set(docId, { type: 'fullDocumentSync', roomId: this.getEffectiveRoomId() ?? '', docId, text, version });
+      logger.warn(`Queued full sync for docId=${docId} until the shared document is available locally.`);
       return;
     }
 
@@ -443,6 +542,8 @@ export class DocumentSync {
     tracked.version = version;
     tracked.lastSyncedText = text;
     tracked.pendingSnapshot = false;
+    this.clearPendingSnapshotTimer(docId);
+    this.pendingFullSyncs.delete(docId);
     await this.persistVersion(docId, version);
     logger.info(`[CodeRooms] Full document sync applied for docId=${docId}, version=${version}`);
     this.emitSharedDocChanged();
@@ -455,29 +556,6 @@ export class DocumentSync {
     }
 
     await this.setActiveDocument(suggestion.docId, true);
-    const tracked = this.documents.get(suggestion.docId);
-    if (!tracked || !tracked.sharedDocument) {
-      return;
-    }
-
-    if (suggestion.patches.length === 0) {
-      this.sendMessage({ type: 'acceptSuggestion', roomId, suggestionId: suggestion.suggestionId });
-      return;
-    }
-
-    for (const patch of suggestion.patches) {
-      const applied = await this.applyPatch(tracked.sharedDocument, patch);
-      if (!applied) {
-        this.requestFullSyncForDoc(suggestion.docId);
-        return;
-      }
-
-      tracked.version += 1;
-    }
-
-    tracked.lastSyncedText = tracked.sharedDocument.getText();
-    await this.persistVersion(suggestion.docId, tracked.version);
-
     this.sendMessage({ type: 'acceptSuggestion', roomId, suggestionId: suggestion.suggestionId });
   }
 
@@ -493,6 +571,7 @@ export class DocumentSync {
   reset(): void {
     this.documents.clear();
     this.activeDocumentId = undefined;
+    this.focusedDocumentId = undefined;
     this.currentRoomId = undefined;
     this.remoteToLocal.clear();
     this.localToRemote.clear();
@@ -500,6 +579,11 @@ export class DocumentSync {
     this.pendingDocChanges.clear();
     this.pendingDocFlush.forEach(timer => clearTimeout(timer));
     this.pendingDocFlush.clear();
+    this.pendingShareDocs.clear();
+    this.pendingFullSyncs.clear();
+    this.pendingSnapshotTimers.forEach(timer => clearTimeout(timer));
+    this.pendingSnapshotTimers.clear();
+    this.pendingUnshares.clear();
     this.roomState.setActiveSharedDocLabel(undefined);
     this.emitSharedDocChanged();
   }
@@ -509,7 +593,7 @@ export class DocumentSync {
       return;
     }
     const docId = this.localToRemote.get(this.uriKey(event.document.uri));
-    if (!docId || !this.documents.has(docId)) {
+    if (!docId || (!this.documents.has(docId) && !this.pendingShareDocs.has(docId))) {
       if (this.roomState.isCollaborator() && this.roomState.getRoomId()) {
         const now = Date.now();
         if (now - this.lastUnsharedEditWarning > 2500) {
@@ -519,11 +603,21 @@ export class DocumentSync {
       }
       return;
     }
-    this.updateActiveDocumentState(docId, docId !== this.activeDocumentId);
+    this.updateFocusedDocumentState(docId, docId !== this.focusedDocumentId);
 
     const tracked = this.documents.get(docId);
     if (tracked) {
       tracked.sharedDocument = event.document;
+    }
+    const pendingShare = this.pendingShareDocs.get(docId);
+    if (pendingShare) {
+      pendingShare.sharedDocument = event.document;
+      this.sendTypingActivity();
+      const queue = this.pendingDocChanges.get(docId) ?? [];
+      queue.push(...event.contentChanges);
+      this.pendingDocChanges.set(docId, queue);
+      this.emitSharedDocChanged();
+      return;
     }
 
     if (this.roomState.isViewer()) {
@@ -578,14 +672,23 @@ export class DocumentSync {
 
   requestFullSyncForDoc(targetDocId: string): void {
     const roomId = this.roomState.getRoomId();
-    const tracked = this.documents.get(targetDocId);
-    if (!roomId || !tracked) {
+    if (!roomId) {
       return;
+    }
+    const tracked = this.documents.get(targetDocId) ?? { docId: targetDocId, version: 0, lastSyncedText: '', pendingSnapshot: false };
+    if (!this.documents.has(targetDocId)) {
+      this.documents.set(targetDocId, tracked);
     }
     if (tracked.pendingSnapshot) {
       return;
     }
     tracked.pendingSnapshot = true;
+    this.clearPendingSnapshotTimer(targetDocId);
+    const timer = setTimeout(() => {
+      tracked.pendingSnapshot = false;
+      this.pendingSnapshotTimers.delete(targetDocId);
+    }, this.pendingSnapshotTimeoutMs);
+    this.pendingSnapshotTimers.set(targetDocId, timer);
     this.sendMessage({ type: 'requestFullSync', roomId, docId: targetDocId });
   }
 
@@ -631,7 +734,16 @@ export class DocumentSync {
     if (!tracked) {
       return;
     }
-    const targetUri = tracked.uri ?? this.remoteToLocal.get(docId);
+    let targetUri = tracked.uri ?? this.remoteToLocal.get(docId);
+    if (!targetUri) {
+      const roomId = this.getEffectiveRoomId();
+      if (roomId && typeof this.storage.getEntry === 'function') {
+        const entry = await this.storage.getEntry(roomId, docId).catch(() => undefined);
+        if (entry) {
+          targetUri = vscode.Uri.parse(entry.localUri);
+        }
+      }
+    }
     if (!targetUri) {
       logger.warn(`No local mapping found for document ${docId}`);
       return;
@@ -648,6 +760,7 @@ export class DocumentSync {
       tracked.sharedDocument = document;
       tracked.uri = document.uri;
       this.registerLocalMapping(docId, document.uri);
+      await this.applyPendingFullSync(docId);
       if (reveal) {
         await vscode.window.showTextDocument(document, { preview: false });
       }
@@ -704,6 +817,11 @@ export class DocumentSync {
     }
     tracked.sharedDocument = undefined;
     tracked.pendingSnapshot = false;
+    this.clearPendingSnapshotTimer(docId!);
+    if (this.focusedDocumentId === docId) {
+      this.focusedDocumentId = undefined;
+      this.updateRoomDocumentLabel();
+    }
     this.emitSharedDocChanged();
   }
 
@@ -712,13 +830,24 @@ export class DocumentSync {
   }
 
   private updateActiveDocumentState(docId: string, emit = false): void {
-    if (!this.documents.has(docId)) {
+    if (!this.documents.has(docId) && !this.pendingShareDocs.has(docId)) {
       return;
     }
     const changed = this.activeDocumentId !== docId;
     this.activeDocumentId = docId;
-    const label = this.documents.get(docId)?.fileName;
-    this.roomState.setActiveSharedDocLabel(label);
+    this.updateRoomDocumentLabel();
+    if (emit && changed) {
+      this.emitSharedDocChanged();
+    }
+  }
+
+  private updateFocusedDocumentState(docId: string, emit = false): void {
+    if (!this.documents.has(docId) && !this.pendingShareDocs.has(docId)) {
+      return;
+    }
+    const changed = this.focusedDocumentId !== docId;
+    this.focusedDocumentId = docId;
+    this.updateRoomDocumentLabel();
     if (emit && changed) {
       this.emitSharedDocChanged();
     }
@@ -766,10 +895,18 @@ export class DocumentSync {
     if (tracked?.uri) {
       this.localToRemote.delete(this.uriKey(tracked.uri));
     }
+    const pendingShare = this.pendingShareDocs.get(docId);
+    if (pendingShare) {
+      this.localToRemote.delete(this.uriKey(pendingShare.uri));
+      this.pendingShareDocs.delete(docId);
+    }
     this.remoteToLocal.delete(docId);
     this.documents.delete(docId);
     this.pendingSuggestionPatches.delete(docId);
     this.pendingDocChanges.delete(docId);
+    this.pendingFullSyncs.delete(docId);
+    this.pendingUnshares.delete(docId);
+    this.clearPendingSnapshotTimer(docId);
     const pending = this.pendingDocFlush.get(docId);
     if (pending) {
       clearTimeout(pending);
@@ -777,9 +914,11 @@ export class DocumentSync {
     }
     if (this.activeDocumentId === docId) {
       this.activeDocumentId = this.getActiveDocumentId();
-      const label = this.activeDocumentId ? this.documents.get(this.activeDocumentId)?.fileName : undefined;
-      this.roomState.setActiveSharedDocLabel(label);
     }
+    if (this.focusedDocumentId === docId) {
+      this.focusedDocumentId = undefined;
+    }
+    this.updateRoomDocumentLabel();
     this.emitSharedDocChanged();
   }
 
@@ -805,6 +944,7 @@ export class DocumentSync {
     const roomId = this.getEffectiveRoomId();
     const tracked = this.documents.get(docId);
     if (!roomId || !tracked || !tracked.sharedDocument) {
+      logger.warn(`Skipped flushing pending changes for docId=${docId}: missing room, tracked document, or editor.`);
       return;
     }
 
@@ -822,6 +962,32 @@ export class DocumentSync {
     tracked.lastSyncedText = tracked.sharedDocument.getText();
     this.pendingDocChanges.set(docId, []);
     await this.persistVersion(docId, tracked.version);
+  }
+
+  private async applyPendingFullSync(docId: string): Promise<void> {
+    const queued = this.pendingFullSyncs.get(docId);
+    if (!queued) {
+      return;
+    }
+    this.pendingFullSyncs.delete(docId);
+    await this.applyFullDocumentSync(docId, queued.text, queued.version);
+  }
+
+  private clearPendingSnapshotTimer(docId: string): void {
+    const timer = this.pendingSnapshotTimers.get(docId);
+    if (!timer) {
+      return;
+    }
+    clearTimeout(timer);
+    this.pendingSnapshotTimers.delete(docId);
+  }
+
+  private updateRoomDocumentLabel(): void {
+    const preferredId = this.focusedDocumentId ?? this.activeDocumentId;
+    const label = preferredId
+      ? this.documents.get(preferredId)?.fileName ?? this.pendingShareDocs.get(preferredId)?.fileName
+      : undefined;
+    this.roomState.setActiveSharedDocLabel(label);
   }
 
   private uriKey(uri: vscode.Uri): string {

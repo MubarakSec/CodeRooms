@@ -14,7 +14,8 @@ import {
   Role,
   RoomMode,
   ServerToClientMessage,
-  Suggestion
+  Suggestion,
+  SuggestionReviewAction
 } from './types';
 import { log } from './logger';
 import { applyPatch } from './patch';
@@ -35,6 +36,8 @@ import {
   getCorruptBackupPath,
   parseRoomsBackup,
   serializeRoomsBackup,
+  writeRoomsBackupAtomically,
+  writeRoomsBackupAtomicallySync,
   type PersistedRoomState
 } from './backupPersistence';
 import {
@@ -57,7 +60,10 @@ import {
   applySuggestionPatches,
   canSubmitSuggestion,
   createPendingSuggestion,
-  getPendingSuggestionsForRole
+  getPendingSuggestionsForRole,
+  isIdempotentSuggestionReplay,
+  pruneReviewedSuggestions,
+  transitionSuggestionStatus
 } from './suggestions';
 import { createSerialTaskRunner } from './serialTaskRunner';
 import { validateJoinAccess } from './joinAccess';
@@ -120,6 +126,7 @@ const MAX_ROOMS_PER_IP = 10;
 const MAX_CONNECTIONS_PER_IP = 20;
 const MAX_DOCUMENTS_PER_ROOM = 50;
 const MAX_SUGGESTIONS_PER_ROOM = 100;
+const MAX_REVIEWED_SUGGESTIONS = 200;
 const MAX_TOTAL_DOC_BYTES = 256 * 1024 * 1024; // 256 MB total memory budget for document text
 let totalDocBytes = 0;
 const roomCountByIp = new Map<string, number>();
@@ -167,9 +174,7 @@ async function saveRooms(): Promise<void> {
   const metrics = buildCurrentRecoveryMetrics();
   
   // Atomic write: write to temp file first, then rename to prevent corruption on crash
-  const tmpFile = BACKUP_FILE + '.tmp';
-  await fsp.writeFile(tmpFile, serializeRoomsBackup(data, savedAt));
-  await fsp.rename(tmpFile, BACKUP_FILE);
+  await writeRoomsBackupAtomically(fsp, BACKUP_FILE, serializeRoomsBackup(data, savedAt));
   
   // Create timestamped backup (keep last 10)
   const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
@@ -337,9 +342,7 @@ function saveRoomsSync(): void {
   const data = buildPersistedRoomsSnapshot();
   const metrics = buildCurrentRecoveryMetrics();
   const savedAt = Date.now();
-  const tmpFile = BACKUP_FILE + '.tmp';
-  fs.writeFileSync(tmpFile, serializeRoomsBackup(data, savedAt));
-  fs.renameSync(tmpFile, BACKUP_FILE);
+  writeRoomsBackupAtomicallySync(fs, BACKUP_FILE, serializeRoomsBackup(data, savedAt));
   log('rooms_saved_sync', {
     roomCount: metrics.roomCount,
     documentCount: metrics.documentCount,
@@ -489,6 +492,9 @@ function handleMessage(context: ConnectionContext, message: unknown): void {
       break;
     case 'rejectSuggestion':
       handleSuggestionDecision(context, message.suggestionId, false);
+      break;
+    case 'reviewSuggestions':
+      handleReviewSuggestions(context, message);
       break;
     case 'setEditMode':
       setEditMode(context, message.userId, message.direct);
@@ -896,6 +902,10 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
     rejectTrackedMessage(context.ws, message, 'Join a room before sharing documents.', 'ROOM_STATE_INVALID');
     return;
   }
+  if (room.roomId !== message.roomId) {
+    rejectTrackedMessage(context.ws, message, 'Document share does not match your active room.', 'ROOM_STATE_INVALID');
+    return;
+  }
   if (!canPerformOwnerAction(context.userId, room.ownerId)) {
     rejectTrackedMessage(context.ws, message, 'Only the room owner can share documents.', 'FORBIDDEN');
     return;
@@ -912,6 +922,17 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
   }
 
   const existing = room.documents.get(message.docId);
+  if (
+    existing
+    && existing.text === message.text
+    && existing.version === message.version
+    && existing.originalUri === message.originalUri
+    && existing.fileName === message.fileName
+    && existing.languageId === message.languageId
+  ) {
+    sendAckForMessage(context.ws, message);
+    return;
+  }
   const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, existing?.text ?? '', message.text);
   if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
     rejectTrackedMessage(context.ws, message, 'Server memory limit reached. Cannot share more documents.', 'MEMORY_LIMIT');
@@ -940,7 +961,7 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
     languageId: message.languageId,
     text: message.text,
     version: message.version
-  }, context.ws);
+  });
   sendAckForMessage(context.ws, message);
 
   log('doc_shared', { roomId: room.roomId, docId: message.docId, ownerId: room.ownerId, fileName: message.fileName });
@@ -957,18 +978,22 @@ function handleUnshareDocument(context: ConnectionContext, documentId: string): 
     rejectTrackedMessage(context.ws, message, 'Join a room before unsharing documents.', 'ROOM_STATE_INVALID');
     return;
   }
+  if (room.roomId !== message.roomId) {
+    rejectTrackedMessage(context.ws, { ...message, roomId: room.roomId }, 'Document unshare does not match your active room.', 'ROOM_STATE_INVALID');
+    return;
+  }
   if (!canPerformOwnerAction(context.userId, room.ownerId)) {
     rejectTrackedMessage(context.ws, message, 'Only the room owner can unshare documents.', 'FORBIDDEN');
     return;
   }
   const removed = room.documents.get(documentId);
   if (!removed) {
-    rejectTrackedMessage(context.ws, { ...message, roomId: room.roomId }, 'Document not found.', 'TARGET_NOT_FOUND');
+    sendAckForMessage(context.ws, { ...message, roomId: room.roomId });
     return;
   }
   totalDocBytes -= Buffer.byteLength(removed.text, 'utf8');
   room.documents.delete(documentId);
-  broadcast(room, { type: 'documentUnshared', roomId: room.roomId, documentId }, context.ws);
+  broadcast(room, { type: 'documentUnshared', roomId: room.roomId, documentId });
   sendAckForMessage(context.ws, { type: 'unshareDocument', roomId: room.roomId, documentId });
   log('doc_unshared', { roomId: room.roomId, docId: documentId, ownerId: room.ownerId });
 }
@@ -1079,7 +1104,8 @@ function handleSuggestion(
   }
   suggestionLimiter.recordFailure(suggestKey);
 
-  if (room.suggestions.size >= MAX_SUGGESTIONS_PER_ROOM) {
+  const pendingSuggestionCount = Array.from(room.suggestions.values()).filter(suggestion => suggestion.status === 'pending').length;
+  if (pendingSuggestionCount >= MAX_SUGGESTIONS_PER_ROOM) {
     rejectTrackedMessage(context.ws, message, `Suggestion limit reached (max ${MAX_SUGGESTIONS_PER_ROOM}).`, 'SUGGESTION_LIMIT');
     return;
   }
@@ -1091,6 +1117,16 @@ function handleSuggestion(
   }
   if (!room.documents.has(message.docId)) {
     rejectTrackedMessage(context.ws, message, 'Document not found.', 'TARGET_NOT_FOUND');
+    return;
+  }
+
+  const existing = room.suggestions.get(message.suggestionId);
+  if (existing) {
+    if (isIdempotentSuggestionReplay(existing, message, participant)) {
+      sendAckForMessage(context.ws, message);
+      return;
+    }
+    rejectTrackedMessage(context.ws, message, 'Suggestion id already exists for a different review payload.', 'CONFLICT');
     return;
   }
 
@@ -1119,29 +1155,129 @@ function handleSuggestionDecision(context: ConnectionContext, suggestionId: stri
     return;
   }
 
-  const suggestion = room.suggestions.get(suggestionId);
-  if (!suggestion) {
+  const result = reviewSuggestion(room, context.userId, suggestionId, accepted ? 'accept' : 'reject');
+  if (result.outcome === 'missing' || result.outcome === 'already-reviewed') {
     sendAckKey(context.ws, `suggest:${suggestionId}`);
     return;
   }
+  if (result.outcome === 'error') {
+    rejectTrackedMessage(
+      context.ws,
+      accepted
+        ? { type: 'acceptSuggestion', roomId: room.roomId, suggestionId }
+        : { type: 'rejectSuggestion', roomId: room.roomId, suggestionId },
+      result.message,
+      result.code
+    );
+    return;
+  }
 
-  if (accepted) {
+  sendAckKey(context.ws, `suggest:${suggestionId}`);
+}
+
+function handleReviewSuggestions(
+  context: ConnectionContext,
+  message: Extract<ClientToServerMessage, { type: 'reviewSuggestions' }>
+): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) {
+    sendError(context.ws, 'Join the target room before reviewing suggestions.', 'ROOM_STATE_INVALID');
+    return;
+  }
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
+    sendError(context.ws, 'Only the room owner can review suggestions.', 'FORBIDDEN');
+    return;
+  }
+
+  const suggestionIds = Array.from(new Set(message.suggestionIds));
+  let reviewedCount = 0;
+  let alreadyReviewedCount = 0;
+  let conflictCount = 0;
+  let missingCount = 0;
+
+  for (const suggestionId of suggestionIds) {
+    const result = reviewSuggestion(room, context.userId, suggestionId, message.action);
+    switch (result.outcome) {
+      case 'reviewed':
+        reviewedCount += 1;
+        break;
+      case 'already-reviewed':
+        alreadyReviewedCount += 1;
+        break;
+      case 'error':
+        conflictCount += 1;
+        break;
+      case 'missing':
+        missingCount += 1;
+        break;
+    }
+  }
+
+  send(context.ws, {
+    type: 'suggestionsReviewed',
+    roomId: room.roomId,
+    action: message.action,
+    requestedCount: suggestionIds.length,
+    reviewedCount,
+    alreadyReviewedCount,
+    conflictCount,
+    missingCount
+  });
+}
+
+function reviewSuggestion(
+  room: RoomState,
+  reviewerId: string,
+  suggestionId: string,
+  action: SuggestionReviewAction
+):
+  | { outcome: 'reviewed' | 'already-reviewed' | 'missing' }
+  | { outcome: 'error'; code: string; message: string } {
+  const suggestion = room.suggestions.get(suggestionId);
+  if (!suggestion) {
+    return { outcome: 'missing' };
+  }
+
+  if (suggestion.status !== 'pending') {
+    if (
+      (action === 'accept' && suggestion.status === 'accepted')
+      || (action === 'reject' && suggestion.status === 'rejected')
+    ) {
+      return { outcome: 'already-reviewed' };
+    }
+    return {
+      outcome: 'error',
+      code: 'SUGGESTION_ALREADY_REVIEWED',
+      message: `Suggestion already ${suggestion.status}.`
+    };
+  }
+
+  if (action === 'accept') {
     const doc = room.documents.get(suggestion.docId);
     if (!doc) {
-      rejectTrackedMessage(context.ws, { type: 'acceptSuggestion', roomId: room.roomId, suggestionId }, 'Document not found.', 'TARGET_NOT_FOUND');
-      return;
+      return {
+        outcome: 'error',
+        code: 'TARGET_NOT_FOUND',
+        message: 'Document not found.'
+      };
     }
 
     const appliedSuggestion = applySuggestionPatches(doc.text, doc.version, suggestion.patches, suggestion.authorId);
     if (!appliedSuggestion) {
-      rejectTrackedMessage(context.ws, { type: 'acceptSuggestion', roomId: room.roomId, suggestionId }, 'Invalid suggestion payload', 'PATCH_INVALID');
-      return;
+      return {
+        outcome: 'error',
+        code: 'PATCH_INVALID',
+        message: 'Invalid suggestion payload'
+      };
     }
 
     const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, doc.text, appliedSuggestion.text);
     if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
-      rejectTrackedMessage(context.ws, { type: 'acceptSuggestion', roomId: room.roomId, suggestionId }, 'Server memory limit reached. Cannot accept suggestion.', 'MEMORY_LIMIT');
-      return;
+      return {
+        outcome: 'error',
+        code: 'MEMORY_LIMIT',
+        message: 'Server memory limit reached. Cannot accept suggestion.'
+      };
     }
 
     totalDocBytes = nextTotalDocBytes;
@@ -1158,24 +1294,28 @@ function handleSuggestionDecision(context: ConnectionContext, suggestionId: stri
         version: entry.version,
         patch: entry.patch,
         authorId: suggestion.authorId
-      }, context.ws);
+      });
     }
     room.documents.set(suggestion.docId, doc);
   }
 
-  room.suggestions.delete(suggestionId);
+  const reviewed = transitionSuggestionStatus(suggestion, action, reviewerId);
+  room.suggestions.set(suggestionId, reviewed);
+  pruneReviewedSuggestions(room.suggestions, MAX_REVIEWED_SUGGESTIONS);
   broadcast(room, {
-    type: accepted ? 'suggestionAccepted' : 'suggestionRejected',
+    type: action === 'accept' ? 'suggestionAccepted' : 'suggestionRejected',
     suggestionId,
     docId: suggestion.docId
   });
-  sendAckKey(context.ws, `suggest:${suggestionId}`);
 
-  log(accepted ? 'suggestion_accepted' : 'suggestion_rejected', {
+  log(action === 'accept' ? 'suggestion_accepted' : 'suggestion_rejected', {
     roomId: room.roomId,
     suggestionId,
-    docId: suggestion.docId
+    docId: suggestion.docId,
+    reviewedById: reviewerId
   });
+
+  return { outcome: 'reviewed' };
 }
 
 function handleRequestFullSync(context: ConnectionContext, roomId: string, docId: string): void {

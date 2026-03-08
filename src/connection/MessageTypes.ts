@@ -6,6 +6,7 @@ export {
   Position,
   TextPatch,
   Suggestion,
+  SuggestionReviewAction,
   ClientToServerMessage,
   ServerToClientMessage
 } from '../../shared/protocol';

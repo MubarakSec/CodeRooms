@@ -13,12 +13,23 @@ import { OutboundMessageQueue } from './core/OutboundMessageQueue';
 import { StatusBarManager } from './ui/StatusBarManager';
 import { ParticipantsView } from './ui/ParticipantsView';
 import { ChatView } from './ui/ChatView';
-import { ClientToServerMessage, Participant, Role, RoomMode, ServerToClientMessage, Suggestion } from './connection/MessageTypes';
+import { ClientToServerMessage, Participant, Role, RoomMode, ServerToClientMessage, Suggestion, SuggestionReviewAction } from './connection/MessageTypes';
 import { DEFAULT_SERVER_URL } from './util/config';
 import { logger } from './util/logger';
 import { encrypt, decrypt, type EncryptedPayload } from './util/crypto';
 import { consumePendingRoomSecret } from './util/roomSecrets';
-import { buildWelcomeMessage, getEncryptionNotice } from './util/roomNotices';
+import {
+  buildSuggestionReviewSummary,
+  buildWelcomeMessage,
+  getDocumentResyncNotice,
+  getEncryptionNotice,
+  getJoinAccessDeniedNotice,
+  getJoinAccessRetryActionLabel,
+  getOwnerUnavailableNotice,
+  getReconnectFailureNotice,
+  getRoomClosedNotice,
+  getRoomStateInvalidNotice
+} from './util/roomNotices';
 import { v4 as uuidv4 } from 'uuid';
 
 const DISPLAY_NAME_KEY = 'coderooms.displayName';
@@ -121,8 +132,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const sendRootCursorUpdate = (editor: vscode.TextEditor): void => {
     const roomId = roomState.getRoomId();
-    const docId = documentSync.getActiveDocumentId();
-    const sharedUri = documentSync.getSharedDocumentUri();
+    const docId = documentSync.getFocusedDocumentId() ?? documentSync.getActiveDocumentId();
+    const sharedUri = documentSync.getFocusedSharedDocumentUri() ?? documentSync.getSharedDocumentUri();
     if (!roomId || !docId || !sharedUri) {
       return;
     }
@@ -254,10 +265,7 @@ export function activate(context: vscode.ExtensionContext): void {
   webSocket.on('reconnectFailed', () => {
     statusBar.setConnectionState('error', 'Could not reconnect after multiple attempts');
     resetState();
-    void vscode.window.showErrorMessage(
-      'CodeRooms: unable to reconnect to the server after multiple attempts.',
-      'Retry'
-    ).then(action => {
+    void vscode.window.showErrorMessage(getReconnectFailureNotice(), 'Retry').then(action => {
       if (action === 'Retry') {
         void ensureConnection(ConnectionIntent.ForceReconnect);
       }
@@ -559,6 +567,18 @@ export function activate(context: vscode.ExtensionContext): void {
         });
         break;
       }
+      case 'suggestionsReviewed': {
+        void vscode.window.showInformationMessage(
+          buildSuggestionReviewSummary({
+            action: message.action,
+            reviewedCount: message.reviewedCount,
+            alreadyReviewedCount: message.alreadyReviewedCount,
+            conflictCount: message.conflictCount,
+            missingCount: message.missingCount
+          })
+        );
+        break;
+      }
       case 'chatMessage': {
         let content = message.content;
         // Decrypt if E2E is active and content is an encrypted blob
@@ -606,10 +626,10 @@ export function activate(context: vscode.ExtensionContext): void {
             break;
           case 'ROOM_ACCESS_DENIED': {
             const action = await vscode.window.showErrorMessage(
-              'Unable to join room. Check the invite code, secret, or token and try again.',
-              'Retry with secret or token'
+              getJoinAccessDeniedNotice(),
+              getJoinAccessRetryActionLabel()
             );
-            if (action === 'Retry with secret or token') {
+            if (action === getJoinAccessRetryActionLabel()) {
               await retryJoinWithSecret('Enter the room secret or invite token and try again.');
             }
             break;
@@ -621,7 +641,7 @@ export function activate(context: vscode.ExtensionContext): void {
             void vscode.window.showErrorMessage('Room not found. Double-check the invite code.');
             break;
           case 'PATCH_INVALID':
-            void vscode.window.showWarningMessage('A document change failed to apply on the server. The file will resync automatically.');
+            void vscode.window.showWarningMessage(getDocumentResyncNotice());
             break;
           case 'MESSAGE_TOO_LONG':
             void vscode.window.showWarningMessage('Message is too long (max 2000 characters).');
@@ -645,16 +665,22 @@ export function activate(context: vscode.ExtensionContext): void {
             void vscode.window.showWarningMessage('Invite labels must be 80 characters or fewer.');
             break;
           case 'OWNER_UNAVAILABLE':
-            void vscode.window.showWarningMessage('The room owner is unavailable right now, so the file cannot resync yet.');
+            void vscode.window.showWarningMessage(getOwnerUnavailableNotice());
             break;
           case 'ROOM_STATE_INVALID':
-            void vscode.window.showWarningMessage('This action no longer matches the active room state. Retry after rejoining or reopening the shared file.');
+            void vscode.window.showWarningMessage(getRoomStateInvalidNotice());
+            break;
+          case 'SUGGESTION_ALREADY_REVIEWED':
+            void vscode.window.showWarningMessage('That suggestion has already been reviewed.');
+            break;
+          case 'CONFLICT':
+            void vscode.window.showWarningMessage('This request conflicts with the current shared state. Refresh the session and retry.');
             break;
           default:
             if (payload.toLowerCase().includes('room not found')) {
               void vscode.window.showErrorMessage('Room not found. Double-check the invite code.');
             } else if (payload.toLowerCase().includes('room closed')) {
-              void vscode.window.showWarningMessage('The room has been closed by the owner.');
+              void vscode.window.showWarningMessage(getRoomClosedNotice());
               resetState();
             } else {
               void vscode.window.showErrorMessage(`CodeRooms: ${payload}`);
@@ -1100,16 +1126,30 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   async function clearPendingSuggestions(): Promise<void> {
+    await reviewPendingSuggestions('reject');
+  }
+
+  async function acceptPendingSuggestions(): Promise<void> {
+    await reviewPendingSuggestions('accept');
+  }
+
+  async function reviewPendingSuggestions(action: SuggestionReviewAction): Promise<void> {
     if (!roomState.isRoot()) {
-      void vscode.window.showInformationMessage('Only the room owner can clear suggestions.');
+      void vscode.window.showInformationMessage('Only the room owner can review suggestions.');
       return;
     }
-    const rejected = await suggestionManager.rejectAllPending();
-    if (rejected === 0) {
-      void vscode.window.showInformationMessage('No pending suggestions to clear.');
+    const roomId = roomState.getRoomId();
+    const suggestionIds = suggestionManager.getPendingSuggestionIds();
+    if (!roomId || suggestionIds.length === 0) {
+      void vscode.window.showInformationMessage('No pending suggestions to review.');
       return;
     }
-    void vscode.window.showInformationMessage(`Rejected ${rejected} pending suggestion${rejected === 1 ? '' : 's'}.`);
+    sendClientMessage({
+      type: 'reviewSuggestions',
+      roomId,
+      suggestionIds,
+      action
+    });
   }
 
   async function retryJoinWithSecret(message: string): Promise<void> {
@@ -1159,6 +1199,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('coderooms.kickParticipant', handleKickParticipant),
     vscode.commands.registerCommand('coderooms.acceptSuggestion', item => handleSuggestionAction(item, 'accept')),
     vscode.commands.registerCommand('coderooms.rejectSuggestion', item => handleSuggestionAction(item, 'reject')),
+    vscode.commands.registerCommand('coderooms.acceptPendingSuggestions', () => void acceptPendingSuggestions()),
     vscode.commands.registerCommand('coderooms.clearPendingSuggestions', () => void clearPendingSuggestions()),
     vscode.commands.registerCommand('coderooms.unshareCurrentFile', unshareCurrentFile),
     vscode.commands.registerCommand('coderooms.setActiveDocument', setActiveSharedDocument),

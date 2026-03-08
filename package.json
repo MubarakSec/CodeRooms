@@ -41,6 +41,7 @@
         "onCommand:coderooms.kickParticipant",
         "onCommand:coderooms.acceptSuggestion",
         "onCommand:coderooms.rejectSuggestion",
+        "onCommand:coderooms.acceptPendingSuggestions",
         "onCommand:coderooms.unshareCurrentFile",
         "onView:coderoomsChat",
         "onView:coderoomsPanel",
@@ -149,6 +150,10 @@
             {
                 "command": "coderooms.rejectSuggestion",
                 "title": "CodeRooms: Reject Suggestion"
+            },
+            {
+                "command": "coderooms.acceptPendingSuggestions",
+                "title": "CodeRooms: Accept Pending Suggestions"
             },
             {
                 "command": "coderooms.clearPendingSuggestions",
@@ -296,6 +301,23 @@
                 }
             ]
         },
+        "keybindings": [
+            {
+                "command": "coderooms.openParticipantsView",
+                "key": "ctrl+alt+p",
+                "mac": "cmd+alt+p"
+            },
+            {
+                "command": "coderooms.focusChatInput",
+                "key": "ctrl+alt+c",
+                "mac": "cmd+alt+c"
+            },
+            {
+                "command": "coderooms.reconnect",
+                "key": "ctrl+alt+r",
+                "mac": "cmd+alt+r"
+            }
+        ],
         "viewsContainers": {
             "activitybar": [
                 {

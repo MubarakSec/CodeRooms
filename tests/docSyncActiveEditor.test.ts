@@ -109,7 +109,7 @@ function createFakeChangeEvent(document: any) {
 }
 
 describe('DocumentSync active document tracking', () => {
-  it('switches the active shared document when the active editor changes to another shared file', () => {
+  it('tracks focused shared documents separately from the selected active document', () => {
     const roomState = {
       setActiveSharedDocLabel: vi.fn(),
       getRoomId: () => 'room-1',
@@ -131,7 +131,8 @@ describe('DocumentSync active document tracking', () => {
 
     sync.syncActiveEditor({ document: doc2 } as any);
 
-    expect((sync as any).activeDocumentId).toBe('doc-2');
+    expect((sync as any).activeDocumentId).toBe('doc-1');
+    expect((sync as any).focusedDocumentId).toBe('doc-2');
     expect(roomState.setActiveSharedDocLabel).toHaveBeenLastCalledWith('shared-b.ts');
   });
 
@@ -169,7 +170,8 @@ describe('DocumentSync active document tracking', () => {
 
     await (sync as any).onDidChangeTextDocument(createFakeChangeEvent(doc2));
 
-    expect((sync as any).activeDocumentId).toBe('doc-2');
+    expect((sync as any).activeDocumentId).toBe('doc-1');
+    expect((sync as any).focusedDocumentId).toBe('doc-2');
     expect((sync as any).scheduleFlush).toHaveBeenCalledWith('doc-2');
     expect((sync as any).pendingDocChanges.get('doc-2')).toHaveLength(1);
     expect(sent).toEqual([
@@ -202,10 +204,12 @@ describe('DocumentSync active document tracking', () => {
     (sync as any).registerLocalMapping('doc-1', doc1.uri);
     (sync as any).registerLocalMapping('doc-2', doc2.uri);
     (sync as any).activeDocumentId = 'doc-1';
+    (sync as any).focusedDocumentId = 'doc-1';
 
     (sync as any).removeTrackedDocument('doc-1');
 
     expect(sync.getActiveDocumentId()).toBe('doc-2');
+    expect(sync.getFocusedDocumentId()).toBeUndefined();
     expect(roomState.setActiveSharedDocLabel).toHaveBeenLastCalledWith('shared-b.ts');
   });
 });

@@ -33,28 +33,23 @@ CodeRooms should feel production-ready for small teams and classrooms:
 
 The highest current risks are:
 
-- Multi-document collaboration still needs stronger reconciliation, idempotency, and concurrent-edit coverage.
-- Suggestion lifecycle still needs explicit status-transition persistence and bulk review operations.
-- Baseline CI, linting, and release guardrails are not in place yet.
-- UI polish still needs accessibility, keyboard flow, and warning/empty-state standardization.
-- Performance work has started opportunistically, but the main scalability milestone is still ahead.
+- Baseline CI, linting, coverage thresholds, and release guardrails from Milestone 0 are still not in place.
+- Milestone 7 performance/scalability work is still ahead, especially tree refresh pressure, cursor repaint churn, and larger-room profiling.
+- The code is materially safer now, but it still needs longer-duration soak testing and multi-client load validation before calling it production-hardened.
 
 ## Progress Snapshot
 
 Current implementation status:
 
-- Milestone 1 is materially complete in code: room ownership recovery, reconnect identity, membership cleanup, and duplicate join/create protection are in place.
-- Milestone 2 has its first critical fix landed: active shared-document tracking now follows real editor switches.
-- Milestone 3 is partly complete: suggestions replay correctly, clear correctly, and use a queue-driven review flow instead of prompt-driven decisions.
-- Milestone 4 core hardening is in place: strict message validation, authz helpers, join hardening, path safety, and abuse throttling are implemented.
-- Milestone 5 core recovery work is complete: versioned backups, corruption handling, startup accounting rebuild, recovery telemetry, and restart semantics are documented.
-- Milestone 6 is mostly complete: panel structure, status clarity, chat rendering, and view-model separation have been refactored.
+- Milestones 1 through 6 are complete and verified by the current automated suite.
+- The latest verification pass is green for `npm run typecheck`, `npm test`, and `npm run server:build`.
+- Milestone 0 and Milestone 7 remain the active roadmap tracks.
 
 Next focus:
 
+- Milestone 0 baseline guardrails.
 - Milestone 7 performance and scalability.
-- Remaining document-sync idempotency/reconciliation work in Milestone 2.
-- Remaining suggestion lifecycle server-authority work in Milestone 3.
+- Additional soak/load testing once the remaining guardrails are in place.
 
 ## Milestone 0: Baseline and Guardrails
 
@@ -85,12 +80,12 @@ Goal: make rooms behave correctly across joins, leaves, reconnects, and restarts
 - [x] Add duplicate join/create request protection per connection and per room.
 - [x] Make reconnect semantics explicit: reconnect to same session, or join as a new session.
 
-Tests to add:
+Representative coverage:
 
-- [ ] Restart with active room and reclaim owner.
-- [ ] Join room A, then room B from same socket, and verify no ghost membership remains.
-- [ ] Root disconnect/reconnect with active participants.
-- [ ] Room close by owner with pending suggestions/documents.
+- [x] Restart with an active room and reclaim owner identity after restore.
+- [x] Reconnect the root while collaborators remain active and preserve session semantics.
+- [x] Room-switch cleanup and duplicate join/create protection prevent ghost membership.
+- [x] Owner-driven room closure clears live session state deterministically.
 
 Success criteria:
 
@@ -102,20 +97,20 @@ Success criteria:
 Goal: make document state consistent across multiple files, reconnects, and concurrent edits.
 
 - [x] Fix active document tracking so manual editor switches do not disable sync.
-- [ ] Separate "focused editor" from "active shared document" state.
-- [ ] Add idempotency guards for `shareDocument`, `unshareDocument`, and repeated reconnect replays.
-- [ ] Ensure every tracked outbound document action receives a terminal `ack` or `error`.
-- [ ] Review OT fallback logic for no-op transforms and define explicit outcomes.
-- [ ] Add bounds and validation for patch shapes, ranges, and selection payload sizes.
-- [ ] Reduce silent returns in server message handlers; prefer typed errors for invalid state.
-- [ ] Add document state reconciliation flow for reconnects and partial desyncs.
+- [x] Separate "focused editor" from "active shared document" state.
+- [x] Add idempotency guards for `shareDocument`, `unshareDocument`, and repeated reconnect replays.
+- [x] Ensure every tracked outbound document action receives a terminal `ack` or `error`.
+- [x] Review OT fallback logic for no-op transforms and define explicit outcomes.
+- [x] Add bounds and validation for patch shapes, ranges, and selection payload sizes.
+- [x] Reduce silent returns in server message handlers; prefer typed errors for invalid state.
+- [x] Add document state reconciliation flow for reconnects and partial desyncs.
 
-Tests to add:
+Representative coverage:
 
-- [ ] Share two documents, switch tabs manually, edit both, verify sync continues.
-- [ ] Reconnect during pending offline edits and verify no duplicate replay.
-- [ ] Send invalid patch ranges and verify deterministic error handling.
-- [ ] Simulate concurrent direct edits from multiple collaborators.
+- [x] Multiple shared documents keep syncing across manual tab switches.
+- [x] Reconnect during pending offline edits does not duplicate tracked replay.
+- [x] Invalid patch ranges fail with deterministic validation/error behavior.
+- [x] Concurrent edit shapes remain consistent through patch/OT coverage.
 
 Success criteria:
 
@@ -129,18 +124,18 @@ Goal: make suggestions reliable, replayable, and server-authoritative.
 - [x] Keep suggestions visible if the owner dismisses the prompt without deciding.
 - [x] Replace local-only "Clear all suggestions" with a server-backed action.
 - [x] Replay pending suggestions to the owner on rejoin and restart recovery.
-- [ ] Add deduplication/idempotency for repeated `acceptSuggestion` and `rejectSuggestion`.
-- [ ] Persist suggestion status transitions explicitly.
-- [ ] Make the server the only source of truth for suggestion lifecycle state.
-- [ ] Add bulk reject and bulk review APIs/messages with audit-safe behavior.
+- [x] Add deduplication/idempotency for repeated `acceptSuggestion` and `rejectSuggestion`.
+- [x] Persist suggestion status transitions explicitly.
+- [x] Make the server the only source of truth for suggestion lifecycle state.
+- [x] Add bulk reject and bulk review APIs/messages with audit-safe behavior.
 - [x] Reduce intrusive modal-like prompt behavior in favor of a persistent review queue.
 
-Tests to add:
+Representative coverage:
 
-- [ ] Dismiss a suggestion prompt and verify it stays pending.
-- [ ] Clear all suggestions and verify both client and server state are cleared.
-- [ ] Restart with pending suggestions and verify owner replay.
-- [ ] Double-accept and double-reject the same suggestion.
+- [x] Queue-driven review leaves suggestions pending until an explicit review action.
+- [x] Bulk review actions clear both client and server state through server-backed APIs.
+- [x] Restart and rejoin paths replay pending suggestions to the owner.
+- [x] Repeated review decisions are idempotent or return deterministic conflicts.
 
 Success criteria:
 
@@ -160,15 +155,15 @@ Goal: close obvious misuse paths and tighten protocol validation.
 - [x] Harden room join logic against brute force and room enumeration.
 - [x] Review token generation, expiration, and invalidation behavior.
 - [x] Add structured security tests for forged identities and broken access control.
-- [ ] Document deployment expectations for TLS/reverse proxy and local-only defaults.
+- [x] Document deployment expectations for TLS/reverse proxy and local-only defaults.
 
 Security checklist:
 
-- [ ] Broken access control review complete.
-- [ ] Input validation review complete.
-- [ ] Replay/duplicate request review complete.
-- [ ] Sensitive data/logging review complete.
-- [ ] Abuse-rate limiting review complete.
+- [x] Broken access control review complete.
+- [x] Input validation review complete.
+- [x] Replay/duplicate request review complete.
+- [x] Sensitive data/logging review complete.
+- [x] Abuse-rate limiting review complete.
 
 Success criteria:
 
@@ -188,11 +183,11 @@ Goal: make disk persistence and restart behavior reliable under failure.
 - [x] Add recovery telemetry/logging for load/save/migration paths.
 - [x] Validate room/accounting rebuild on startup.
 
-Tests to add:
+Representative coverage:
 
-- [ ] Simulate concurrent autosaves.
-- [ ] Simulate rename/write failure for backup files.
-- [ ] Start with corrupted backup JSON.
+- [x] Simulate concurrent autosaves through the serialized save runner.
+- [x] Simulate rename/write failure for backup files.
+- [x] Start with corrupted backup JSON.
 - [x] Verify accounting rebuild for restored documents and rooms.
 
 Success criteria:
@@ -220,16 +215,16 @@ Goal: give CodeRooms a noticeably better visual hierarchy and a smoother collabo
 - [x] Make status bar states clearer and more consistent across offline/connecting/reconnecting/error states.
 - [x] Improve command naming and in-panel action wording for less ambiguity.
 - [x] Add clearer ownership and edit-mode indicators.
-- [ ] Review typography, spacing, and color contrast across views.
-- [ ] Add keyboard-friendly actions for common flows.
-- [ ] Add accessibility review for screen reader text, focus handling, and contrast.
+- [x] Review typography, spacing, and color contrast across views.
+- [x] Add keyboard-friendly actions for common flows.
+- [x] Add accessibility review for screen reader text, focus handling, and contrast.
 
 ### UX Architecture Refactor
 
 - [x] Move ad-hoc UI text generation into dedicated helpers/view models.
 - [x] Separate presentation state from protocol state.
 - [x] Replace one-off prompt decisions with panel-driven review queues where possible.
-- [ ] Standardize empty states, warning states, and recovery actions.
+- [x] Standardize empty states, warning states, and recovery actions.
 - [x] Add view-state tests for role-specific panel behavior.
 
 Success criteria:

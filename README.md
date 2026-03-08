@@ -9,6 +9,8 @@ Real-time collaborative coding inside VS Code — no screen sharing, just shared
 > **See [INSTALLATION.md](INSTALLATION.md) for detailed setup instructions.**
 >
 > **See [RECOVERY.md](RECOVERY.md) for restart and persistence semantics.**
+>
+> **See [SECURITY.md](SECURITY.md) for the supported deployment model and security review notes.**
 
 ---
 
