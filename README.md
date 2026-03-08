@@ -11,6 +11,8 @@ Real-time collaborative coding inside VS Code — no screen sharing, just shared
 > **See [RECOVERY.md](RECOVERY.md) for restart and persistence semantics.**
 >
 > **See [SECURITY.md](SECURITY.md) for the supported deployment model and security review notes.**
+>
+> **See [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) for the Milestone 0 release gate checklist.**
 
 ---
 
@@ -46,6 +48,10 @@ npm run server:start
 
 # 3. Launch the extension
 # Open the repo in VS Code → press F5 → "Run Extension"
+
+# 4. Verify local guardrails before shipping changes
+npm run verify
+npm run test:coverage
 ```
 
 In the Extension Development Host, run **CodeRooms: Start Room as Root** from the Command Palette.

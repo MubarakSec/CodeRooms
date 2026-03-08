@@ -257,6 +257,18 @@ npm test
 
 This runs the full [Vitest](https://vitest.dev/) suite — patch logic, OT transforms, crypto, chat, rate limiting, document sync, and integration tests.
 
+For the full local verification pipeline:
+
+```bash
+npm run verify
+```
+
+To generate the guarded coverage report used in CI:
+
+```bash
+npm run test:coverage
+```
+
 To type-check without running:
 
 ```bash
