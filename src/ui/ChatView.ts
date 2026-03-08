@@ -1,12 +1,15 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import { ChatManager } from '../core/ChatManager';
+import { buildChatRenderPlan, chunkChatMessages } from './chatRenderPlan';
 
 export class ChatView implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
+  private lastRenderedMessageIds: string[] = [];
+  private postTimer?: NodeJS.Timeout;
 
   constructor(private readonly chatManager: ChatManager) {
-    this.chatManager.onDidChange(() => this.postMessages());
+    this.chatManager.onDidChange(() => this.schedulePostMessages());
   }
 
   focusInput(): void {
@@ -15,8 +18,15 @@ export class ChatView implements vscode.WebviewViewProvider {
 
   resolveWebviewView(webviewView: vscode.WebviewView): void | Thenable<void> {
     this.view = webviewView;
+    this.lastRenderedMessageIds = [];
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this.renderHtml();
+    webviewView.onDidDispose(() => {
+      if (this.view === webviewView) {
+        this.view = undefined;
+        this.lastRenderedMessageIds = [];
+      }
+    });
     webviewView.webview.onDidReceiveMessage(message => {
       if (message?.type === 'send') {
         const content = typeof message.content === 'string' ? message.content.trim() : '';
@@ -26,18 +36,42 @@ export class ChatView implements vscode.WebviewViewProvider {
         void vscode.commands.executeCommand('coderooms.sendChatMessage', content);
       }
     });
-    this.postMessages();
+    this.schedulePostMessages();
+  }
+
+  private schedulePostMessages(): void {
+    if (!this.view || this.postTimer) {
+      return;
+    }
+    this.postTimer = setTimeout(() => {
+      this.postTimer = undefined;
+      this.postMessages();
+    }, 40);
   }
 
   private postMessages(): void {
     if (!this.view) {
       return;
     }
-    const messages = this.chatManager.getMessages();
-    const chunkSize = 50;
-    for (let i = 0; i < messages.length; i += chunkSize) {
-      const slice = messages.slice(i, i + chunkSize);
-      this.view.webview.postMessage({ type: 'messages', payload: slice, append: i > 0 });
+    const plan = buildChatRenderPlan(this.lastRenderedMessageIds, this.chatManager.getMessages());
+    this.lastRenderedMessageIds = plan.messageIds;
+
+    if (plan.append && plan.messages.length === 0) {
+      return;
+    }
+
+    const chunks = chunkChatMessages(plan.messages, 50);
+    if (chunks.length === 0) {
+      this.view.webview.postMessage({ type: 'messages', payload: [], append: false });
+      return;
+    }
+
+    for (const [index, chunk] of chunks.entries()) {
+      this.view.webview.postMessage({
+        type: 'messages',
+        payload: chunk,
+        append: plan.append || index > 0
+      });
     }
   }
 
@@ -81,6 +115,23 @@ export class ChatView implements vscode.WebviewViewProvider {
 
       .wrapper { display: flex; flex-direction: column; height: 100%; }
 
+      .chat-header {
+        padding: 10px 12px 8px;
+        border-bottom: 1px solid var(--border);
+        background: linear-gradient(180deg, rgba(128,128,128,0.06), rgba(128,128,128,0.01));
+      }
+      .chat-title {
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+        text-transform: uppercase;
+      }
+      .chat-hint {
+        margin-top: 4px;
+        font-size: 11px;
+        color: var(--text-dim);
+      }
+
       /* Empty state */
       .empty-state {
         flex: 1; display: flex; flex-direction: column;
@@ -93,7 +144,7 @@ export class ChatView implements vscode.WebviewViewProvider {
 
       /* Messages */
       .messages {
-        flex: 1; padding: 6px 8px; overflow-y: auto;
+        flex: 1; padding: 8px 10px; overflow-y: auto;
         display: flex; flex-direction: column; gap: 2px;
       }
       .messages::-webkit-scrollbar { width: 6px; }
@@ -232,16 +283,20 @@ export class ChatView implements vscode.WebviewViewProvider {
   </head>
   <body>
     <div class="wrapper">
+      <div class="chat-header">
+        <div class="chat-title">Room Chat</div>
+        <div class="chat-hint">Enter to send. Shift+Enter adds a new line.</div>
+      </div>
       <div id="empty" class="empty-state">
         <div class="icon">\ud83d\udcac</div>
-        <div class="title">Room chat</div>
-        <div class="subtitle">Messages appear here once someone sends one</div>
+        <div class="title">Session chat is quiet</div>
+        <div class="subtitle">Messages from the room will appear here as soon as someone speaks up.</div>
       </div>
-      <div id="messages" class="messages" style="display:none;"></div>
-      <button id="scrollBtn" class="scroll-anchor" title="Scroll to bottom">\u2193</button>
+      <div id="messages" class="messages" style="display:none;" role="log" aria-live="polite" aria-label="CodeRooms chat messages"></div>
+      <button id="scrollBtn" class="scroll-anchor" title="Scroll to bottom" aria-label="Scroll chat to the latest messages">\u2193</button>
       <form id="composer" class="composer">
-        <textarea id="input" class="input" rows="1" placeholder="Message the room\u2026 (Enter to send)"></textarea>
-        <button class="send-btn" type="submit" id="sendBtn" disabled title="Send message">
+        <textarea id="input" class="input" rows="1" placeholder="Message the room\u2026" aria-label="Message the room"></textarea>
+        <button class="send-btn" type="submit" id="sendBtn" disabled title="Send message" aria-label="Send message">
           <svg viewBox="0 0 16 16"><path d="M1.7 1.1L14.7 7.6c.4.2.4.6 0 .8L1.7 14.9c-.4.2-.8-.1-.7-.5L2.5 9H8.5c.3 0 .5-.2.5-.5S8.8 8 8.5 8H2.5L1 1.6c-.1-.4.3-.7.7-.5z"/></svg>
         </button>
       </form>
@@ -295,6 +350,7 @@ export class ChatView implements vscode.WebviewViewProvider {
         const hasMessages = append ? list.children.length > 0 || messages.length > 0 : messages.length > 0;
         empty.style.display = hasMessages ? 'none' : '';
         list.style.display = hasMessages ? '' : 'none';
+        const fragment = document.createDocumentFragment();
 
         (messages || []).forEach(msg => {
           // Date divider
@@ -305,7 +361,7 @@ export class ChatView implements vscode.WebviewViewProvider {
             const divider = document.createElement('div');
             divider.className = 'date-divider';
             divider.textContent = msgDate;
-            list.appendChild(divider);
+            fragment.appendChild(divider);
           }
 
           if (msg.isSystem) {
@@ -315,7 +371,7 @@ export class ChatView implements vscode.WebviewViewProvider {
               '<span class="sys-icon">\u2139\ufe0f</span>' +
               '<span>' + escapeHtml(msg.content) + '</span>' +
               '<span class="sys-time">' + formatTime(msg.timestamp) + '</span>';
-            list.appendChild(sysRow);
+            fragment.appendChild(sysRow);
             lastAuthor = '';
             return;
           }
@@ -360,11 +416,15 @@ export class ChatView implements vscode.WebviewViewProvider {
           body.appendChild(content);
 
           row.appendChild(body);
-          list.appendChild(row);
+          fragment.appendChild(row);
 
           lastAuthor = msg.fromUserId;
           lastTime = msg.timestamp;
         });
+
+        if (fragment.childNodes.length > 0) {
+          list.appendChild(fragment);
+        }
 
         if (autoScroll) {
           list.scrollTop = list.scrollHeight;

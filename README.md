@@ -7,6 +7,8 @@
 Real-time collaborative coding inside VS Code — no screen sharing, just shared buffers, roles, and quick actions. CodeRooms pairs a lightweight Node.js WebSocket server with a VS Code extension so teams can create rooms, share documents, chat, and code together without leaving the editor.
 
 > **See [INSTALLATION.md](INSTALLATION.md) for detailed setup instructions.**
+>
+> **See [RECOVERY.md](RECOVERY.md) for restart and persistence semantics.**
 
 ---
 
@@ -108,6 +110,7 @@ Resolution order: CLI → environment variable → config file → default.
 - Display names capped at 50 characters; message payloads capped at 512 KB.
 - No built-in TLS — run behind a reverse proxy (nginx, Caddy) for production use.
 - Room state persisted via atomic JSON backups; auto-restored on restart.
+- Restart behavior and recoverable-state boundaries are documented in [RECOVERY.md](RECOVERY.md).
 
 ---
 

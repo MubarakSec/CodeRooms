@@ -2,34 +2,24 @@ import * as path from 'path';
 import { promises as fs } from 'fs';
 import * as vscode from 'vscode';
 import { logger } from '../util/logger';
-import { Role, RoomMode } from '../connection/MessageTypes';
+import { RoomMode } from '../connection/MessageTypes';
+import {
+  createDefaultRoomMetadata,
+  parseRoomMetadata,
+  RoomDocumentEntry,
+  RoomEvent,
+  RoomMetadata,
+  serializeRoomMetadata
+} from './roomMetadata';
+import { isPathInside, sanitizeRoomFolderName, sanitizeSharedFileName } from './storagePaths';
+import {
+  DEFAULT_ROOM_STORAGE_TTL_MS,
+  MAX_ROOM_EVENT_LOG_BYTES,
+  isStorageEntryStale,
+  trimEventLogContent
+} from './storageRetention';
 
-export interface RoomDocumentEntry {
-  docId: string;
-  originalUri: string;
-  fileName: string;
-  localUri: string;
-  lastVersion: number;
-}
-
-export interface RoomEvent {
-  type: 'joined' | 'left' | 'roleChanged' | 'suggestionCreated' | 'suggestionAccepted' | 'suggestionRejected';
-  roomId: string;
-  userId?: string;
-  fromRole?: Role;
-  toRole?: Role;
-  suggestionId?: string;
-  docId?: string;
-  timestamp: number;
-}
-
-interface RoomMetadata {
-  roomId: string;
-  mode?: RoomMode;
-  documents: RoomDocumentEntry[];
-  createdAt: number;
-  lastUpdatedAt: number;
-}
+export type { RoomDocumentEntry, RoomEvent, RoomMetadata } from './roomMetadata';
 
 export class RoomStorage {
   private readonly roomsRoot: string;
@@ -40,6 +30,30 @@ export class RoomStorage {
 
   async prepare(): Promise<void> {
     await this.ensureDir(this.roomsRoot);
+  }
+
+  async pruneStaleRooms(
+    now = Date.now(),
+    maxAgeMs = DEFAULT_ROOM_STORAGE_TTL_MS,
+    maxEventLogBytes = MAX_ROOM_EVENT_LOG_BYTES
+  ): Promise<void> {
+    await this.ensureDir(this.roomsRoot);
+    const entries = await fs.readdir(this.roomsRoot, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const roomFolder = path.join(this.roomsRoot, entry.name);
+      const retentionTimestamp = await this.getRetentionTimestamp(roomFolder, entry.name, now);
+      if (isStorageEntryStale(retentionTimestamp, now, maxAgeMs)) {
+        await fs.rm(roomFolder, { recursive: true, force: true });
+        continue;
+      }
+
+      await this.trimEventLog(roomFolder, maxEventLogBytes);
+    }
   }
 
   async registerDocument(
@@ -61,14 +75,18 @@ export class RoomStorage {
     // so we do not create conflicting copies or fail to open an existing file.
     if (existing) {
       const existingPath = vscode.Uri.parse(existing.localUri).fsPath;
-      await this.ensureDir(path.dirname(existingPath));
-      await fs.writeFile(existingPath, text, 'utf8');
-      existing.fileName = path.basename(existingPath);
-      existing.lastVersion = version;
-      metadata.documents = metadata.documents.map(item => item.docId === docId ? existing : item);
-      metadata.lastUpdatedAt = Date.now();
-      await this.writeMetadata(roomId, metadata);
-      return { uri: vscode.Uri.file(existingPath), entry: existing };
+      if (isPathInside(filesFolder, existingPath)) {
+        await this.ensureDir(path.dirname(existingPath));
+        await fs.writeFile(existingPath, text, 'utf8');
+        existing.fileName = path.basename(existingPath);
+        existing.lastVersion = version;
+        metadata.documents = metadata.documents.map(item => item.docId === docId ? existing : item);
+        metadata.lastUpdatedAt = Date.now();
+        await this.writeMetadata(roomId, metadata);
+        return { uri: vscode.Uri.file(existingPath), entry: existing };
+      }
+
+      metadata.documents = metadata.documents.filter(item => item.docId !== docId);
     }
 
     const targetName = await this.resolveFileName(filesFolder, fileName);
@@ -109,7 +127,7 @@ export class RoomStorage {
   }
 
   async clearRoom(roomId: string): Promise<void> {
-    const roomFolder = path.join(this.roomsRoot, roomId);
+    const roomFolder = this.getRoomFolder(roomId);
     try {
       await fs.rm(roomFolder, { recursive: true, force: true });
     } catch (error) {
@@ -134,40 +152,79 @@ export class RoomStorage {
   }
 
   getRoomFolder(roomId: string): string {
-    return path.join(this.roomsRoot, path.basename(roomId));
+    return path.join(this.roomsRoot, sanitizeRoomFolderName(roomId));
   }
 
   private async ensureRoomFolders(roomId: string): Promise<string> {
-    // Sanitize roomId to prevent directory traversal
-    const safeRoomId = path.basename(roomId);
-    const roomFolder = path.join(this.roomsRoot, safeRoomId);
+    const roomFolder = this.getRoomFolder(roomId);
     await this.ensureDir(roomFolder);
     return roomFolder;
   }
 
+  private async getRetentionTimestamp(roomFolder: string, roomId: string, now: number): Promise<number> {
+    const metadataPath = path.join(roomFolder, 'room.json');
+    try {
+      const raw = await fs.readFile(metadataPath, 'utf8');
+      return parseRoomMetadata(raw, roomId, now).lastUpdatedAt || now;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        logger.warn(`Invalid retention metadata for ${roomId}; falling back to folder mtime.`);
+      }
+      try {
+        const stat = await fs.stat(roomFolder);
+        return stat.mtimeMs;
+      } catch {
+        return now;
+      }
+    }
+  }
+
   private async readMetadata(roomId: string): Promise<RoomMetadata> {
-    const roomFolder = path.join(this.roomsRoot, path.basename(roomId));
+    const roomFolder = this.getRoomFolder(roomId);
     const metadataPath = path.join(roomFolder, 'room.json');
 
     try {
       const raw = await fs.readFile(metadataPath, 'utf8');
-      return JSON.parse(raw) as RoomMetadata;
+      const metadata = parseRoomMetadata(raw, roomId);
+      const filesFolder = path.join(roomFolder, 'files');
+      const filteredDocuments = metadata.documents.filter(entry => this.isSafeDocumentEntry(entry, filesFolder));
+      if (filteredDocuments.length !== metadata.documents.length) {
+        const sanitizedMetadata = {
+          ...metadata,
+          documents: filteredDocuments,
+          lastUpdatedAt: Date.now()
+        };
+        await this.writeMetadata(roomId, sanitizedMetadata);
+        return sanitizedMetadata;
+      }
+      return metadata;
     } catch (error) {
-      const now = Date.now();
-      return { roomId, mode: undefined, documents: [], createdAt: now, lastUpdatedAt: now };
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return createDefaultRoomMetadata(roomId);
+      }
+
+      const corruptPath = `${metadataPath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      try {
+        await this.ensureDir(roomFolder);
+        await fs.rename(metadataPath, corruptPath);
+      } catch {
+        // Keep the original error context below; quarantine is best effort.
+      }
+
+      logger.warn(`Invalid room metadata for ${roomId}; resetting metadata state.`);
+      return createDefaultRoomMetadata(roomId);
     }
   }
 
   private async writeMetadata(roomId: string, metadata: RoomMetadata): Promise<void> {
-    const roomFolder = path.join(this.roomsRoot, path.basename(roomId));
+    const roomFolder = this.getRoomFolder(roomId);
     await this.ensureDir(roomFolder);
     const metadataPath = path.join(roomFolder, 'room.json');
-    await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf8');
+    await fs.writeFile(metadataPath, serializeRoomMetadata(metadata), 'utf8');
   }
 
   private async resolveFileName(folder: string, fileName: string): Promise<string> {
-    // Sanitize: strip directory traversal and path separators, keep only the base name
-    const sanitized = path.basename(fileName).replace(/\.\./g, '');
+    const sanitized = sanitizeSharedFileName(fileName);
     const parsed = path.parse(sanitized);
     let candidate = sanitized || 'shared-file.txt';
     let suffix = 2;
@@ -182,8 +239,35 @@ export class RoomStorage {
     return candidate;
   }
 
+  private isSafeDocumentEntry(entry: RoomDocumentEntry, filesFolder: string): boolean {
+    try {
+      const localPath = vscode.Uri.parse(entry.localUri).fsPath;
+      if (!localPath) {
+        return false;
+      }
+      return isPathInside(filesFolder, localPath);
+    } catch {
+      return false;
+    }
+  }
+
   private async ensureDir(target: string): Promise<void> {
     await fs.mkdir(target, { recursive: true });
+  }
+
+  private async trimEventLog(roomFolder: string, maxEventLogBytes: number): Promise<void> {
+    const logPath = path.join(roomFolder, 'events.log');
+    try {
+      const raw = await fs.readFile(logPath, 'utf8');
+      const trimmed = trimEventLogContent(raw, maxEventLogBytes);
+      if (trimmed !== raw) {
+        await fs.writeFile(logPath, trimmed, 'utf8');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        logger.warn(`Failed to trim event log in ${roomFolder}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 
   private async exists(target: string): Promise<boolean> {

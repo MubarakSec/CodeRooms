@@ -1,8 +1,7 @@
 import * as vscode from 'vscode';
 import { RoomState } from '../core/RoomState';
 import { FollowController } from '../core/FollowController';
-
-type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error' | 'reconnecting';
+import { buildStatusBarViewModel, ConnectionState } from './viewState';
 
 export class StatusBarManager {
   private readonly item: vscode.StatusBarItem;
@@ -27,79 +26,26 @@ export class StatusBarManager {
   }
 
   update(): void {
-    const roomId = this.roomState.getRoomId();
-    const role = this.roomState.getRole();
+    const presentation = buildStatusBarViewModel({
+      connectionState: this.connectionState,
+      connectionDetail: this.connectionDetail,
+      reconnectAttempt: this.reconnectAttempt,
+      roomId: this.roomState.getRoomId(),
+      role: this.roomState.getRole(),
+      activeDocumentLabel: this.roomState.getActiveSharedDocLabel(),
+      participantCount: this.roomState.getParticipants().length,
+      isFollowing: this.followController?.isFollowing() ?? false,
+      collaboratorDirectMode: this.roomState.isCollaboratorInDirectMode()
+    });
 
-    if (this.connectionState === 'reconnecting') {
-      this.item.text = `$(sync~spin) CR reconnecting (${this.reconnectAttempt})`;
-      this.item.tooltip = this.connectionDetail ?? `Reconnecting... attempt ${this.reconnectAttempt}`;
-      this.item.command = undefined;
-      this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-      return;
-    }
-
-    // Reset background color for non-warning states
-    this.item.backgroundColor = undefined;
-
-    if (this.connectionState === 'connecting') {
-      this.item.text = '$(sync~spin) CR connecting';
-      this.item.tooltip = this.connectionDetail ?? 'Attempting to reach the CodeRooms server';
-      this.item.command = undefined;
-      return;
-    }
-
-    if (this.connectionState === 'error') {
-      this.item.text = '$(error) CR error';
-      this.item.tooltip = this.connectionDetail ?? 'Connection error. Click to retry.';
-      this.item.command = 'coderooms.reconnect';
-      this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
-      return;
-    }
-
-    if (this.connectionState === 'disconnected' && !roomId) {
-      this.item.text = '$(debug-disconnect) CR offline';
-      this.item.tooltip = 'Click to reconnect to the server';
-      this.item.command = 'coderooms.reconnect';
-      return;
-    }
-
-    if (!roomId) {
-      this.item.text = '$(pass) CR connected';
-      this.item.tooltip = 'Connected to the CodeRooms server. Click to open the CodeRooms panel.';
-      this.item.command = 'coderooms.openParticipantsView';
-      return;
-    }
-
-    this.item.command = 'coderooms.openParticipantsView';
-
-    const activeDoc = this.roomState.getActiveSharedDocLabel?.() ?? '';
-    const docPart = activeDoc ? ` • ${activeDoc}` : '';
-
-    const participantCount = this.roomState.getParticipants().length;
-    const peoplePart = participantCount > 0 ? ` $(organization) ${participantCount}` : '';
-
-    if (role === 'root') {
-      this.item.text = `$(crown) CR ${roomId}${docPart}${peoplePart}`;
-      this.item.tooltip = `Room owner · ${participantCount} participant${participantCount !== 1 ? 's' : ''} — click to open panel`;
-      return;
-    }
-
-    if (role === 'collaborator') {
-      const mode = this.roomState.isCollaboratorInDirectMode() ? 'direct' : 'suggest';
-      const followSuffix = this.followController?.isFollowing() ? ' • follow' : '';
-      this.item.text = `$(pencil) CR ${roomId}${docPart} • ${mode}${followSuffix}${peoplePart}`;
-      this.item.tooltip = `Collaborator · ${mode} mode${followSuffix ? ' · following root' : ''} · ${participantCount} participant${participantCount !== 1 ? 's' : ''}`;
-      return;
-    }
-
-    if (role === 'viewer') {
-      this.item.text = `$(eye) CR ${roomId} • view${docPart ? docPart : ''}${peoplePart}`;
-      this.item.tooltip = `Viewer · read-only · ${participantCount} participant${participantCount !== 1 ? 's' : ''}`;
-      return;
-    }
-
-    this.item.text = `CR ${roomId}${docPart}`;
-    this.item.tooltip = 'CodeRooms session is active';
+    this.item.text = presentation.text;
+    this.item.tooltip = presentation.tooltip;
+    this.item.command = presentation.command;
+    this.item.backgroundColor = presentation.emphasis === 'warning'
+      ? new vscode.ThemeColor('statusBarItem.warningBackground')
+      : presentation.emphasis === 'error'
+        ? new vscode.ThemeColor('statusBarItem.errorBackground')
+        : undefined;
   }
 
   dispose(): void {

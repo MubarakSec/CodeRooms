@@ -48,10 +48,12 @@ describe('RoomState', () => {
     const state = new RoomState();
     state.setSelfInfo('u1', 'root', 'room1');
     state.setParticipants([makeParticipant('u1', 'root'), makeParticipant('u2')]);
+    state.setActiveSharedDocLabel('main.ts');
     state.reset();
     expect(state.getRoomId()).toBeUndefined();
     expect(state.getUserId()).toBeUndefined();
     expect(state.getParticipants()).toHaveLength(0);
+    expect(state.getActiveSharedDocLabel()).toBeUndefined();
   });
 
   it('setParticipants replaces participant list', () => {

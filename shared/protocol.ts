@@ -34,7 +34,7 @@ export interface Suggestion {
 
 export type ClientToServerMessage =
   | { type: "createRoom"; displayName: string; mode: RoomMode; secret?: string }
-  | { type: "joinRoom"; roomId: string; displayName: string; secret?: string; token?: string }
+  | { type: "joinRoom"; roomId: string; displayName: string; secret?: string; token?: string; sessionToken?: string }
   | { type: "leaveRoom" }
   | { type: "updateRole"; userId: string; role: "collaborator" | "viewer" }
   | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text: string; version: number }
@@ -53,8 +53,10 @@ export type ClientToServerMessage =
   | { type: "createToken"; label?: string };
 
 export type ServerToClientMessage =
-  | { type: "roomCreated"; roomId: string; userId: string; mode: RoomMode }
-  | { type: "joinedRoom"; roomId: string; userId: string; role: Role; participants: Participant[]; mode: RoomMode }
+  | { type: "ack"; key: string }
+  | { type: "roomCreated"; roomId: string; userId: string; mode: RoomMode; sessionToken: string }
+  | { type: "joinedRoom"; roomId: string; userId: string; role: Role; participants: Participant[]; mode: RoomMode; sessionToken: string }
+  | { type: "syncSuggestions"; suggestions: Suggestion[] }
   | { type: "participantJoined"; participant: Participant }
   | { type: "participantLeft"; userId: string }
   | { type: "roleUpdated"; userId: string; role: Role }

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { getClientMessageAckKey } from '../shared/ackKeys';
 
 vi.mock('vscode', () => {
   return {
@@ -38,20 +39,6 @@ class FakeSocket {
 
 describe('Pending queue dedup', () => {
   it('deduplicates by message key when reconnecting', () => {
-    // mimic extension logic for messageKey
-    const messageKey = (message: ClientToServerMessage): string | undefined => {
-      switch (message.type) {
-        case 'chatSend':
-          return `chat:${message.messageId}`;
-        case 'docChange':
-          return `doc:${message.docId}:${message.version}`;
-        case 'suggestion':
-          return `suggest:${message.suggestionId}`;
-        default:
-          return undefined;
-      }
-    };
-
     const pendingAck = new Map<string, ClientToServerMessage>();
     const pendingOffline: ClientToServerMessage[] = [];
     const socket = new FakeSocket();
@@ -62,7 +49,7 @@ describe('Pending queue dedup', () => {
       while (pendingOffline.length) {
         const next = pendingOffline.shift();
         if (next) {
-          const key = messageKey(next);
+          const key = getClientMessageAckKey(next);
           if (key && pendingAck.has(key)) {
             continue;
           }
@@ -83,12 +70,32 @@ describe('Pending queue dedup', () => {
       timestamp: Date.now()
     };
     pendingOffline.push(msg, msg);
-    const key = messageKey(msg)!;
+    const key = getClientMessageAckKey(msg)!;
     pendingAck.set(key, msg);
 
     flushPending();
 
     expect(socket.sent.length).toBe(1);
     expect(pendingAck.has(key)).toBe(true);
+  });
+
+  it('clears pending state from explicit server acknowledgements', () => {
+    const pendingAck = new Map<string, ClientToServerMessage>();
+    const message: ClientToServerMessage = {
+      type: 'docChange',
+      roomId: 'room1',
+      docId: 'doc1',
+      version: 2,
+      patch: {
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        text: 'x'
+      }
+    };
+
+    const key = getClientMessageAckKey(message)!;
+    pendingAck.set(key, message);
+    pendingAck.delete(key);
+
+    expect(pendingAck.size).toBe(0);
   });
 });

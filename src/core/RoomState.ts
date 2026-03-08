@@ -34,6 +34,7 @@ export class RoomState {
     this.participantActivity.clear();
     this.participantFiles.clear();
     this.mode = undefined;
+    this.activeSharedDocLabel = undefined;
   }
 
   setParticipants(list: Participant[]): void {

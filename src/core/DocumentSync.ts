@@ -143,9 +143,10 @@ export class DocumentSync {
   }
 
   getActiveDocumentId(): string | undefined {
-    if (this.activeDocumentId) {
+    if (this.activeDocumentId && this.documents.has(this.activeDocumentId)) {
       return this.activeDocumentId;
     }
+    this.activeDocumentId = undefined;
     const first = this.documents.values().next().value as TrackedDocument | undefined;
     return first?.docId;
   }
@@ -164,11 +165,20 @@ export class DocumentSync {
     if (!this.documents.has(docId)) {
       return;
     }
-    this.activeDocumentId = docId;
-    const label = this.documents.get(docId)?.fileName;
-    this.roomState.setActiveSharedDocLabel(label);
+    this.updateActiveDocumentState(docId);
     await this.ensureDocumentIsOpen(docId, reveal);
     this.emitSharedDocChanged();
+  }
+
+  syncActiveEditor(editor?: vscode.TextEditor): void {
+    if (!editor) {
+      return;
+    }
+    const docId = this.localToRemote.get(this.uriKey(editor.document.uri));
+    if (!docId || !this.documents.has(docId)) {
+      return;
+    }
+    this.updateActiveDocumentState(docId, true);
   }
 
   hasPendingSuggestion(docId?: string): boolean {
@@ -463,7 +473,6 @@ export class DocumentSync {
       }
 
       tracked.version += 1;
-      this.sendMessage({ type: 'docChange', roomId, docId: suggestion.docId, version: tracked.version, patch });
     }
 
     tracked.lastSyncedText = tracked.sharedDocument.getText();
@@ -510,12 +519,7 @@ export class DocumentSync {
       }
       return;
     }
-    if (!this.activeDocumentId) {
-      this.activeDocumentId = docId;
-    }
-    if (docId !== this.activeDocumentId) {
-      return;
-    }
+    this.updateActiveDocumentState(docId, docId !== this.activeDocumentId);
 
     const tracked = this.documents.get(docId);
     if (tracked) {
@@ -705,6 +709,19 @@ export class DocumentSync {
 
   private emitSharedDocChanged(): void {
     this.sharedDocEmitter.fire();
+  }
+
+  private updateActiveDocumentState(docId: string, emit = false): void {
+    if (!this.documents.has(docId)) {
+      return;
+    }
+    const changed = this.activeDocumentId !== docId;
+    this.activeDocumentId = docId;
+    const label = this.documents.get(docId)?.fileName;
+    this.roomState.setActiveSharedDocLabel(label);
+    if (emit && changed) {
+      this.emitSharedDocChanged();
+    }
   }
 
   private registerLocalMapping(docId: string, uri: vscode.Uri): void {

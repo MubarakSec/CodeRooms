@@ -9,13 +9,16 @@ import { RoomEvent, RoomStorage } from './core/RoomStorage';
 import { SuggestionManager } from './core/SuggestionManager';
 import { ChatManager } from './core/ChatManager';
 import { CursorManager } from './core/CursorManager';
+import { OutboundMessageQueue } from './core/OutboundMessageQueue';
 import { StatusBarManager } from './ui/StatusBarManager';
 import { ParticipantsView } from './ui/ParticipantsView';
 import { ChatView } from './ui/ChatView';
 import { ClientToServerMessage, Participant, Role, RoomMode, ServerToClientMessage, Suggestion } from './connection/MessageTypes';
 import { DEFAULT_SERVER_URL } from './util/config';
 import { logger } from './util/logger';
-import { deriveKey, encrypt, decrypt, type EncryptedPayload } from './util/crypto';
+import { encrypt, decrypt, type EncryptedPayload } from './util/crypto';
+import { consumePendingRoomSecret } from './util/roomSecrets';
+import { buildWelcomeMessage, getEncryptionNotice } from './util/roomNotices';
 import { v4 as uuidv4 } from 'uuid';
 
 const DISPLAY_NAME_KEY = 'coderooms.displayName';
@@ -37,92 +40,23 @@ export function activate(context: vscode.ExtensionContext): void {
   const webSocket = new WebSocketClient();
   let isConnected = false;
   let connectionPromise: Promise<void> | undefined;
-  const pendingOffline: ClientToServerMessage[] = [];
-  const pendingAck = new Map<string, ClientToServerMessage>();
-  const MAX_PENDING_ACK = 200;
+  const outboundQueue = new OutboundMessageQueue(message => webSocket.send(message));
   const pendingRoleUpdates = new Map<string, NodeJS.Timeout>();
   let lastRootCursorMessage: Extract<ServerToClientMessage, { type: 'rootCursor' }> | undefined;
   let e2eKey: Buffer | undefined;     // AES-256-GCM key derived from room secret — null when no secret
   let pendingSecret: string | undefined; // secret held in memory until roomId is known for key derivation
 
-  const messageKey = (message: ClientToServerMessage): string | undefined => {
-    switch (message.type) {
-      case 'chatSend':
-        return `chat:${message.messageId}`;
-      case 'docChange':
-        return `doc:${message.docId}:${message.version}`;
-      case 'suggestion':
-        return `suggest:${message.suggestionId}`;
-      case 'acceptSuggestion':
-      case 'rejectSuggestion':
-        return `suggest:${message.suggestionId}`;
-      case 'shareDocument':
-        return `share:${message.docId}`;
-      case 'unshareDocument':
-        return `unshare:${message.documentId}`;
-      case 'fullDocumentSync':
-        return `full:${message.docId}:${message.version}`;
-      case 'requestFullSync':
-        return `reqfull:${message.docId}`;
-      default:
-        return undefined;
-    }
-  };
-
-  const flushPending = (): void => {
-    if (!isConnected) {
-      return;
-    }
-    // Resend ack-waiting messages
-    for (const [, msg] of pendingAck) {
-      webSocket.send(msg);
-    }
-    // Send offline queued messages
-    while (pendingOffline.length) {
-      const next = pendingOffline.shift();
-      if (next) {
-        const key = messageKey(next);
-        if (key && pendingAck.has(key)) {
-          continue;
-        }
-        if (key) {
-          pendingAck.set(key, next);
-        }
-        webSocket.send(next);
-      }
-    }
-  };
-
-  const sendClientMessage = (message: ClientToServerMessage): void => {
-    if (isConnected) {
-      const key = messageKey(message);
-      if (key) {
-        if (pendingAck.size >= MAX_PENDING_ACK) {
-          // Evict the oldest entry to prevent unbounded growth
-          const first = pendingAck.keys().next().value;
-          if (first !== undefined) { pendingAck.delete(first); }
-        }
-        pendingAck.set(key, message);
-      }
-      webSocket.send(message);
-    } else {
-      const key = messageKey(message);
-      if (key) {
-        if (pendingAck.size >= MAX_PENDING_ACK) {
-          const first = pendingAck.keys().next().value;
-          if (first !== undefined) { pendingAck.delete(first); }
-        }
-        pendingAck.set(key, message);
-      }
-      pendingOffline.push(message);
-    }
-  };
+  const flushPending = (): void => outboundQueue.flush(isConnected);
+  const sendClientMessage = (message: ClientToServerMessage): void => outboundQueue.send(message, isConnected);
 
   const applyDebugConfig = () => {
     const enabled = vscode.workspace.getConfiguration('coderooms').get<boolean>('debugLogging') ?? false;
     logger.setDebugLogging(enabled);
   };
   applyDebugConfig();
+  void roomStorage.prepare().then(() => roomStorage.pruneStaleRooms()).catch(error => {
+    logger.warn(`Failed to prepare or prune room storage: ${error instanceof Error ? error.message : String(error)}`);
+  });
 
   const configWatcher = vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration('coderooms.debugLogging')) {
@@ -162,6 +96,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let lastJoinRoomId: string | undefined;
   let lastJoinDisplayName: string | undefined;
   let lastJoinSecret: string | undefined; // preserved for auto-rejoin on reconnect
+  let lastJoinSessionToken: string | undefined;
   let refreshTimer: NodeJS.Timeout | undefined;
 
   const followDisposable = followController.onDidChange(async () => {
@@ -255,7 +190,10 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   participantsView.registerTreeView('coderoomsPanel', sessionTree);
 
-  const activeEditorListener = vscode.window.onDidChangeActiveTextEditor(editor => scheduleRootCursorBroadcast(editor));
+  const activeEditorListener = vscode.window.onDidChangeActiveTextEditor(editor => {
+    documentSync.syncActiveEditor(editor);
+    scheduleRootCursorBroadcast(editor);
+  });
   const visibleEditorsListener = vscode.window.onDidChangeVisibleTextEditors(() => cursorManager.refreshDecorations());
   const selectionListener = vscode.window.onDidChangeTextEditorSelection(event => scheduleRootCursorBroadcast(event.textEditor));
 
@@ -273,9 +211,6 @@ export function activate(context: vscode.ExtensionContext): void {
     { dispose: () => statusBar.dispose() }
   );
 
-  suggestionManager.onDidChange(() => participantsView.refresh());
-  documentSync.onDidChangeSharedDocument(() => participantsView.refresh());
-
   const scheduleRefresh = () => {
     if (refreshTimer) {
       return;
@@ -287,6 +222,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }, debounceMs);
   };
 
+  suggestionManager.onDidChange(() => scheduleRefresh());
+  documentSync.onDidChangeSharedDocument(() => scheduleRefresh());
+
   webSocket.on('message', message => {
     void handleServerMessage(message);
   });
@@ -294,12 +232,19 @@ export function activate(context: vscode.ExtensionContext): void {
   webSocket.on('connected', () => {
     isConnected = true;
     statusBar.setConnectionState('connected');
-    flushPending();
     // If we were in a room before disconnect, attempt to rejoin
     if (lastJoinRoomId && lastJoinDisplayName) {
       pendingSecret = lastJoinSecret; // re-derive E2E key on rejoin
-      webSocket.send({ type: 'joinRoom', roomId: lastJoinRoomId, displayName: lastJoinDisplayName, secret: lastJoinSecret });
+      webSocket.send({
+        type: 'joinRoom',
+        roomId: lastJoinRoomId,
+        displayName: lastJoinDisplayName,
+        secret: lastJoinSecret,
+        sessionToken: lastJoinSessionToken
+      });
+      return;
     }
+    flushPending();
   });
 
   webSocket.on('reconnecting', (info: { attempt: number; delayMs: number }) => {
@@ -339,8 +284,7 @@ export function activate(context: vscode.ExtensionContext): void {
     chatManager.clear();
     cursorManager.clearAll();
     chatManager.setRoom(undefined);
-    pendingOffline.splice(0, pendingOffline.length);
-    pendingAck.clear();
+    outboundQueue.clear();
     pendingRoleUpdates.forEach(timer => clearTimeout(timer));
     pendingRoleUpdates.clear();
     lastRootCursorMessage = undefined;
@@ -374,7 +318,6 @@ export function activate(context: vscode.ExtensionContext): void {
         isConnected = true;
         connectionPromise = undefined;
         statusBar.setConnectionState('connected');
-        flushPending();
       })
       .catch(error => {
         isConnected = false;
@@ -391,19 +334,25 @@ export function activate(context: vscode.ExtensionContext): void {
 
   async function handleServerMessage(message: ServerToClientMessage): Promise<void> {
     switch (message.type) {
+      case 'ack': {
+        outboundQueue.acknowledge(message.key);
+        break;
+      }
       case 'roomCreated': {
+        const roomSecret = pendingSecret;
         resetState();
         const displayName = await getStoredDisplayName(context);
+        lastJoinRoomId = message.roomId;
+        lastJoinDisplayName = displayName;
+        lastJoinSessionToken = message.sessionToken;
         roomState.setSelfInfo(message.userId, 'root', message.roomId, displayName);
         roomState.setMode(message.mode);
         await recordRoomInfo(message.roomId, message.mode);
         chatManager.setRoom(message.roomId);
         await logRoomEvent({ type: 'joined', userId: message.userId });
-        // Derive E2E key now that we have the roomId as salt
-        if (pendingSecret) {
-          e2eKey = deriveKey(pendingSecret, message.roomId);
-          pendingSecret = undefined;
-        }
+        e2eKey = consumePendingRoomSecret(roomSecret, message.roomId);
+        pendingSecret = undefined;
+        flushPending();
         statusBar.update();
         scheduleRefresh();
         const action = await vscode.window.showInformationMessage(`CodeRoom ready: ${message.roomId}`, 'Copy invite code');
@@ -417,7 +366,7 @@ export function activate(context: vscode.ExtensionContext): void {
             fromUserId: 'system',
             fromName: 'System',
             role: 'root',
-            content: '🔒 **E2E Encryption active.** Chat messages are end-to-end encrypted with your room secret. Share the Room ID and secret separately.',
+            content: getEncryptionNotice(),
             timestamp: Date.now(),
             isSystem: true
           });
@@ -425,33 +374,25 @@ export function activate(context: vscode.ExtensionContext): void {
         break;
       }
       case 'joinedRoom': {
+        const roomSecret = pendingSecret;
         if (roomState.getRoomId() !== message.roomId) {
           resetState();
         }
         const displayName = await getStoredDisplayName(context);
+        lastJoinRoomId = message.roomId;
+        lastJoinDisplayName = displayName;
+        lastJoinSessionToken = message.sessionToken;
         roomState.setSelfInfo(message.userId, message.role, message.roomId, displayName);
         roomState.setMode(message.mode);
         await recordRoomInfo(message.roomId, message.mode);
         roomState.setParticipants(message.participants);
         chatManager.setRoom(message.roomId);
 
-        // Derive E2E key now that we have the roomId as salt
-        if (pendingSecret) {
-          e2eKey = deriveKey(pendingSecret, message.roomId);
-          pendingSecret = undefined;
-        }
+        e2eKey = consumePendingRoomSecret(roomSecret, message.roomId);
+        pendingSecret = undefined;
+        flushPending();
         
-        let welcomeText = `\`\`\n👋 Welcome to the CodeRoom! You joined as a ${message.role}.\n\`\`\n`;
-        if (message.role === 'collaborator') {
-          welcomeText += `✏️ **Suggest Mode:** By default, edits you make turn into inline suggestions for the room owner to approve!\n🖊️ **Direct Edit:** To bypass suggestions and type directly, click the pencil icon in the People panel or toggle the "Suggest" Status Bar item.`;
-        } else if (message.role === 'viewer') {
-          welcomeText += `👁️ **Read Only:** You are currently in read-only mode.`;
-        } else {
-          welcomeText += `🏠 **Owner:** You are the room owner. To share files, open a document and click the "Share Document" icon in the top right window menu, or right click it in the explorer!`;
-        }
-        if (e2eKey) {
-          welcomeText += `\n🔒 **E2E Encryption active.** Chat is end-to-end encrypted with your room secret.`;
-        }
+        const welcomeText = buildWelcomeMessage(message.role, Boolean(e2eKey));
 
         chatManager.addMessage({
           messageId: `sys-welcome-${Date.now()}`,
@@ -464,6 +405,11 @@ export function activate(context: vscode.ExtensionContext): void {
         });
 
         statusBar.update();
+        scheduleRefresh();
+        break;
+      }
+      case 'syncSuggestions': {
+        suggestionManager.replaceAll(message.suggestions);
         scheduleRefresh();
         break;
       }
@@ -534,28 +480,23 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       case 'docChangeBroadcast': {
         await documentSync.applyRemoteChange(message.docId, message.patch, message.version);
-        pendingAck.delete(`doc:${message.docId}:${message.version}`);
         break;
       }
       case 'shareDocument': {
         await documentSync.handleShareDocument(message);
-        pendingAck.delete(`share:${message.docId}`);
         break;
       }
       case 'documentUnshared': {
         await documentSync.handleDocumentUnshared(message);
         scheduleRefresh();
-        pendingAck.delete(`unshare:${message.documentId}`);
         break;
       }
       case 'fullDocumentSync': {
         await documentSync.handleFullDocumentSync(message);
-        pendingAck.delete(`full:${message.docId}:${message.version}`);
         break;
       }
       case 'requestFullSync': {
         await documentSync.handleRequestFullSync(message);
-        pendingAck.delete(`reqfull:${message.docId}`);
         break;
       }
       case 'cursorUpdate': {
@@ -581,14 +522,23 @@ export function activate(context: vscode.ExtensionContext): void {
         break;
       }
       case 'newSuggestion': {
-        suggestionManager.handleSuggestion(message.suggestion);
+        const isNewSuggestion = suggestionManager.handleSuggestion(message.suggestion);
         await logRoomEvent({
           type: 'suggestionCreated',
           suggestionId: message.suggestion.suggestionId,
           docId: message.suggestion.docId,
           userId: message.suggestion.authorId
         });
-        pendingAck.delete(`suggest:${message.suggestion.suggestionId}`);
+        if (isNewSuggestion && roomState.isRoot()) {
+          void vscode.window.showInformationMessage(
+            `${message.suggestion.authorName} sent a suggestion.`,
+            'Open review queue'
+          ).then(action => {
+            if (action === 'Open review queue') {
+              openParticipantsView();
+            }
+          });
+        }
         break;
       }
       case 'suggestionAccepted': {
@@ -598,7 +548,6 @@ export function activate(context: vscode.ExtensionContext): void {
           suggestionId: message.suggestionId,
           docId: message.docId
         });
-        pendingAck.delete(`suggest:${message.suggestionId}`);
         break;
       }
       case 'suggestionRejected': {
@@ -608,7 +557,6 @@ export function activate(context: vscode.ExtensionContext): void {
           suggestionId: message.suggestionId,
           docId: message.docId
         });
-        pendingAck.delete(`suggest:${message.suggestionId}`);
         break;
       }
       case 'chatMessage': {
@@ -631,7 +579,6 @@ export function activate(context: vscode.ExtensionContext): void {
           timestamp: message.timestamp,
           isSystem: message.isSystem
         });
-        pendingAck.delete(`chat:${message.messageId}`);
         break;
       }
       case 'tokenCreated': {
@@ -657,6 +604,16 @@ export function activate(context: vscode.ExtensionContext): void {
           case 'ROOM_SECRET_INVALID':
             await retryJoinWithSecret('Invalid room secret. Check the invite and try again.');
             break;
+          case 'ROOM_ACCESS_DENIED': {
+            const action = await vscode.window.showErrorMessage(
+              'Unable to join room. Check the invite code, secret, or token and try again.',
+              'Retry with secret or token'
+            );
+            if (action === 'Retry with secret or token') {
+              await retryJoinWithSecret('Enter the room secret or invite token and try again.');
+            }
+            break;
+          }
           case 'RATE_LIMITED':
             void vscode.window.showErrorMessage('Too many failed join attempts. Please wait a few minutes and retry.');
             break;
@@ -669,14 +626,29 @@ export function activate(context: vscode.ExtensionContext): void {
           case 'MESSAGE_TOO_LONG':
             void vscode.window.showWarningMessage('Message is too long (max 2000 characters).');
             break;
+          case 'MESSAGE_EMPTY':
+            void vscode.window.showWarningMessage('Message cannot be empty.');
+            break;
           case 'PAYLOAD_TOO_LARGE':
             void vscode.window.showWarningMessage('The file is too large to share (max 2 MB).');
             break;
           case 'DOCUMENT_TOO_LARGE':
             void vscode.window.showWarningMessage('The document is too large to share (max 2 MB).');
             break;
+          case 'MEMORY_LIMIT':
+            void vscode.window.showWarningMessage('The server document memory limit has been reached. Reduce shared document size and retry.');
+            break;
           case 'TOKEN_INVALID':
             void vscode.window.showErrorMessage('Invite token is invalid or has expired. Ask the room owner for a new one.');
+            break;
+          case 'LABEL_TOO_LONG':
+            void vscode.window.showWarningMessage('Invite labels must be 80 characters or fewer.');
+            break;
+          case 'OWNER_UNAVAILABLE':
+            void vscode.window.showWarningMessage('The room owner is unavailable right now, so the file cannot resync yet.');
+            break;
+          case 'ROOM_STATE_INVALID':
+            void vscode.window.showWarningMessage('This action no longer matches the active room state. Retry after rejoining or reopening the shared file.');
             break;
           default:
             if (payload.toLowerCase().includes('room not found')) {
@@ -694,7 +666,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         // On server error, drop any matching pending ack for safety.
         if (message.code === 'ROOM_NOT_FOUND' && roomState.getRoomId()) {
-          pendingAck.clear();
+          outboundQueue.clear();
         }
         break;
       }
@@ -717,7 +689,9 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     const secret = secretInput?.trim() ? secretInput.trim() : undefined;
     pendingSecret = secret; // stored for E2E key derivation once roomId is known
+    lastJoinDisplayName = displayName;
     lastJoinSecret = secret;
+    lastJoinSessionToken = undefined;
     webSocket.send({ type: 'createRoom', displayName, mode, secret });
   }
 
@@ -746,6 +720,7 @@ export function activate(context: vscode.ExtensionContext): void {
     lastJoinSecret = secret;
     lastJoinRoomId = roomId.trim();
     lastJoinDisplayName = displayName;
+    lastJoinSessionToken = undefined;
     webSocket.send({ type: 'joinRoom', roomId: roomId.trim(), displayName, secret, token });
   }
 
@@ -758,6 +733,7 @@ export function activate(context: vscode.ExtensionContext): void {
     lastJoinRoomId = undefined;
     lastJoinDisplayName = undefined;
     lastJoinSecret = undefined;
+    lastJoinSessionToken = undefined;
     resetState();
   }
 
@@ -1123,13 +1099,17 @@ export function activate(context: vscode.ExtensionContext): void {
     chatView.focusInput();
   }
 
-  function clearPendingSuggestions(): void {
+  async function clearPendingSuggestions(): Promise<void> {
     if (!roomState.isRoot()) {
       void vscode.window.showInformationMessage('Only the room owner can clear suggestions.');
       return;
     }
-    suggestionManager.clearAll();
-    void vscode.window.showInformationMessage('Cleared pending suggestions.');
+    const rejected = await suggestionManager.rejectAllPending();
+    if (rejected === 0) {
+      void vscode.window.showInformationMessage('No pending suggestions to clear.');
+      return;
+    }
+    void vscode.window.showInformationMessage(`Rejected ${rejected} pending suggestion${rejected === 1 ? '' : 's'}.`);
   }
 
   async function retryJoinWithSecret(message: string): Promise<void> {
@@ -1151,7 +1131,14 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     pendingSecret = secret;
     lastJoinSecret = secret;
-    webSocket.send({ type: 'joinRoom', roomId: lastJoinRoomId, displayName: lastJoinDisplayName, secret, token });
+    webSocket.send({
+      type: 'joinRoom',
+      roomId: lastJoinRoomId,
+      displayName: lastJoinDisplayName,
+      secret,
+      token,
+      sessionToken: lastJoinSessionToken
+    });
   }
 
   context.subscriptions.push(
@@ -1172,7 +1159,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('coderooms.kickParticipant', handleKickParticipant),
     vscode.commands.registerCommand('coderooms.acceptSuggestion', item => handleSuggestionAction(item, 'accept')),
     vscode.commands.registerCommand('coderooms.rejectSuggestion', item => handleSuggestionAction(item, 'reject')),
-    vscode.commands.registerCommand('coderooms.clearPendingSuggestions', clearPendingSuggestions),
+    vscode.commands.registerCommand('coderooms.clearPendingSuggestions', () => void clearPendingSuggestions()),
     vscode.commands.registerCommand('coderooms.unshareCurrentFile', unshareCurrentFile),
     vscode.commands.registerCommand('coderooms.setActiveDocument', setActiveSharedDocument),
     vscode.commands.registerCommand('coderooms.sendPendingSuggestion', (docId?: string) => void sendPendingSuggestion(docId)),
@@ -1240,4 +1227,3 @@ function extractSuggestion(target: SuggestionLike): Suggestion | undefined {
   }
   return undefined;
 }
-

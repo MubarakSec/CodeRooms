@@ -1,20 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { ClientToServerMessage } from '../src/connection/MessageTypes';
-
-const messageKey = (message: ClientToServerMessage): string | undefined => {
-  switch (message.type) {
-    case 'chatSend':
-      return `chat:${message.messageId}`;
-    case 'docChange':
-      return `doc:${message.docId}:${message.version}`;
-    case 'suggestion':
-      return `suggest:${message.suggestionId}`;
-    case 'shareDocument':
-      return `share:${message.docId}`;
-    default:
-      return undefined;
-  }
-};
+import { getClientMessageAckKey } from '../shared/ackKeys';
 
 class FakeSocket {
   sent: ClientToServerMessage[] = [];
@@ -36,7 +22,7 @@ describe('Integration-lite: offline -> reconnect resend with dedup', () => {
       while (pendingOffline.length) {
         const next = pendingOffline.shift();
         if (next) {
-          const key = messageKey(next);
+          const key = getClientMessageAckKey(next);
           if (key && pendingAck.has(key)) {
             continue;
           }
@@ -71,7 +57,7 @@ describe('Integration-lite: offline -> reconnect resend with dedup', () => {
 
     // offline: enqueue share and duplicate docChange
     pendingOffline.push(share, change, change);
-    pendingAck.set(messageKey(change)!, change);
+    pendingAck.set(getClientMessageAckKey(change)!, change);
 
     flushPending();
 

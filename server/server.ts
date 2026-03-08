@@ -17,13 +17,53 @@ import {
   Suggestion
 } from './types';
 import { log } from './logger';
-import { applyPatch, applyPatches } from './patch';
+import { applyPatch } from './patch';
 import { transformPatch, VersionedPatch } from './ot';
 import { RateLimiter } from './rateLimiter';
 import path from 'path';
 import { pack, unpack } from 'msgpackr';
-
-type ParticipantState = Participant & { isDirectEditMode?: boolean };
+import { getClientMessageAckKey } from '../shared/ackKeys';
+import { getNextTotalDocBytes } from './accounting';
+import {
+  canChangeEditMode,
+  canEditSharedDocument,
+  canPerformOwnerAction,
+  canSendChat
+} from './authorization';
+import { prepareRoomClosure } from './roomClosure';
+import {
+  getCorruptBackupPath,
+  parseRoomsBackup,
+  serializeRoomsBackup,
+  type PersistedRoomState
+} from './backupPersistence';
+import {
+  MAX_INVITE_LABEL_LENGTH,
+  validateClientMessage
+} from './protocolValidation';
+import {
+  createOwnerParticipant,
+  getRestoredOwnerId,
+  ParticipantState,
+  resolveJoinParticipant,
+  restoreSessionState,
+  toPublicParticipant,
+  toRecoverableParticipant,
+  type RecoverableParticipantState
+} from './roomSessions';
+import { getRoomInvariantViolations } from './roomInvariants';
+import { createRoomOperationGuards, getJoinClaimKey } from './roomOperationGuards';
+import {
+  applySuggestionPatches,
+  canSubmitSuggestion,
+  createPendingSuggestion,
+  getPendingSuggestionsForRole
+} from './suggestions';
+import { createSerialTaskRunner } from './serialTaskRunner';
+import { validateJoinAccess } from './joinAccess';
+import { buildTrackedErrorResponses } from './trackedResponses';
+import { getJoinFailureResponse, JOIN_FAILURE_DELAY_MS, type JoinFailureReason } from './joinSecurity';
+import { buildRecoveryMetrics } from './recoveryState';
 
 const MAX_PATCH_HISTORY = 200;
 
@@ -49,7 +89,10 @@ interface ConnectionContext {
 interface RoomState {
   roomId: string;
   ownerId: string;
+  ownerSessionToken: string;
+  ownerIp?: string;
   participants: Map<string, ParticipantState>;
+  recoverableSessions: Map<string, RecoverableParticipantState>;
   connections: Map<string, ConnectionContext>;
   documents: Map<string, DocumentState>;
   suggestions: Map<string, Suggestion>;
@@ -63,6 +106,8 @@ const joinLimiter = new RateLimiter(60_000, 20, 3 * 60_000);
 // Per-user rate limiters for chat and suggestions (10 messages per 10s, block 30s)
 const chatLimiter = new RateLimiter(10_000, 10, 30_000);
 const suggestionLimiter = new RateLimiter(30_000, 5, 60_000);
+const cursorLimiter = new RateLimiter(1_000, 120, 5_000);
+const activityLimiter = new RateLimiter(5_000, 20, 10_000);
 const MAX_CHAT_MESSAGES = 500;
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const inviteTokens = new Map<string, { roomId: string; label?: string; createdAt: number }>();
@@ -73,27 +118,29 @@ const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024; // 2 MB limit for shared documents
 const MAX_ROOMS_GLOBAL = 500;
 const MAX_ROOMS_PER_IP = 10;
 const MAX_CONNECTIONS_PER_IP = 20;
-const MAX_DISPLAY_NAME_LENGTH = 50;
 const MAX_DOCUMENTS_PER_ROOM = 50;
 const MAX_SUGGESTIONS_PER_ROOM = 100;
 const MAX_TOTAL_DOC_BYTES = 256 * 1024 * 1024; // 256 MB total memory budget for document text
 let totalDocBytes = 0;
 const roomCountByIp = new Map<string, number>();
 const connectionsPerIp = new Map<string, number>();
-const pendingAsyncOps = new Set<string>(); // tracks connections in async createRoom/joinRoom
+const roomOperationGuards = createRoomOperationGuards();
+const roomLastActivity = new Map<string, number>();
 
 // Ensure backup directory exists
 if (!fs.existsSync(BACKUP_DIR)) {
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
 }
 
-async function saveRooms(): Promise<void> {
-  const data: Record<string, any> = {};
+function buildPersistedRoomsSnapshot(): Record<string, PersistedRoomState> {
+  const data: Record<string, PersistedRoomState> = {};
   for (const [roomId, room] of rooms.entries()) {
     data[roomId] = {
       roomId: room.roomId,
       ownerId: room.ownerId,
-      participants: Array.from(room.participants.entries()),
+      ownerSessionToken: room.ownerSessionToken,
+      ownerIp: room.ownerIp,
+      recoverableSessions: Array.from(room.recoverableSessions.entries()),
       documents: Array.from(room.documents.entries()),
       suggestions: Array.from(room.suggestions.entries()),
       mode: room.mode,
@@ -101,16 +148,33 @@ async function saveRooms(): Promise<void> {
       chat: room.chat
     };
   }
+  return data;
+}
+
+function buildCurrentRecoveryMetrics() {
+  return buildRecoveryMetrics(Array.from(rooms.values(), room => ({
+    ownerIp: room.ownerIp,
+    documents: room.documents.values(),
+    suggestions: room.suggestions.values(),
+    recoverableSessions: room.recoverableSessions.values(),
+    chat: room.chat
+  })));
+}
+
+async function saveRooms(): Promise<void> {
+  const data = buildPersistedRoomsSnapshot();
+  const savedAt = Date.now();
+  const metrics = buildCurrentRecoveryMetrics();
   
   // Atomic write: write to temp file first, then rename to prevent corruption on crash
   const tmpFile = BACKUP_FILE + '.tmp';
-  await fsp.writeFile(tmpFile, JSON.stringify(data, null, 2));
+  await fsp.writeFile(tmpFile, serializeRoomsBackup(data, savedAt));
   await fsp.rename(tmpFile, BACKUP_FILE);
   
   // Create timestamped backup (keep last 10)
   const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
   const archivedFile = path.join(BACKUP_DIR, `rooms-${timestamp}.json`);
-  await fsp.writeFile(archivedFile, JSON.stringify(data, null, 2));
+  await fsp.writeFile(archivedFile, serializeRoomsBackup(data, savedAt));
   
   // Cleanup old backups (keep last 10)
   try {
@@ -127,37 +191,95 @@ async function saveRooms(): Promise<void> {
   } catch (e) {
     log('backup_cleanup_error', { error: String(e) });
   }
+
+  log('rooms_saved', {
+    roomCount: metrics.roomCount,
+    documentCount: metrics.documentCount,
+    suggestionCount: metrics.suggestionCount,
+    recoverableSessionCount: metrics.recoverableSessionCount,
+    chatMessageCount: metrics.chatMessageCount,
+    totalDocBytes: metrics.totalDocBytes,
+    savedAt
+  });
 }
 
 function loadRooms(): void {
-  if (fs.existsSync(BACKUP_FILE)) {
-    try {
-      const raw = fs.readFileSync(BACKUP_FILE, 'utf-8');
-      const data = JSON.parse(raw);
-      for (const roomId in data) {
-        const d = data[roomId];
-        const restoredDocs = new Map<string, DocumentState>(d.documents);
-        // Initialize patchHistory for restored documents (ephemeral, not persisted)
-        for (const [, doc] of restoredDocs) {
-          (doc as DocumentState).patchHistory = [];
-        }
-        rooms.set(roomId, {
-          roomId: d.roomId,
-          ownerId: d.ownerId,
-          participants: new Map(d.participants),
-          connections: new Map(),
-          documents: restoredDocs,
-          suggestions: new Map(d.suggestions),
-          mode: d.mode,
-          secretHash: d.secretHash,
-          chat: d.chat || []
-        });
-        roomLastActivity.set(roomId, Date.now());
-      }
-      log('server_start', { message: `Restored ${rooms.size} rooms from backup` });
-    } catch (e) {
-      log('error', { message: 'Failed to load rooms backup', error: String(e) });
+  if (!fs.existsSync(BACKUP_FILE)) {
+    log('rooms_restore_skipped', { reason: 'no_backup' });
+    return;
+  }
+
+  log('rooms_restore_started', { backupFile: BACKUP_FILE });
+
+  try {
+    const raw = fs.readFileSync(BACKUP_FILE, 'utf-8');
+    const parsedBackup = parseRoomsBackup(raw);
+    for (const roomId in parsedBackup.rooms) {
+      const d = parsedBackup.rooms[roomId];
+      const restoredDocs = new Map<string, DocumentState>(
+        d.documents.map(([docId, doc]) => [
+          docId,
+          {
+            ...doc,
+            patchHistory: []
+          }
+        ])
+      );
+      const restoredSessionState = restoreSessionState({
+        ownerSessionToken: d.ownerSessionToken,
+        legacyOwnerId: d.ownerId,
+        recoverableSessions: d.recoverableSessions,
+        legacyParticipants: d.participants
+      });
+      rooms.set(roomId, {
+        roomId: d.roomId,
+        ownerId: restoredSessionState.ownerId,
+        ownerSessionToken: restoredSessionState.ownerSessionToken,
+        ownerIp: d.ownerIp,
+        participants: new Map(),
+        recoverableSessions: restoredSessionState.recoverableSessions,
+        connections: new Map(),
+        documents: restoredDocs,
+        suggestions: new Map(d.suggestions),
+        mode: d.mode,
+        secretHash: d.secretHash,
+        chat: d.chat || []
+      });
+      roomLastActivity.set(roomId, Date.now());
     }
+    const recovered = buildRecoveryMetrics(Array.from(rooms.values(), room => ({
+      ownerIp: room.ownerIp,
+      documents: room.documents.values(),
+      suggestions: room.suggestions.values(),
+      recoverableSessions: room.recoverableSessions.values(),
+      chat: room.chat
+    })));
+    totalDocBytes = recovered.totalDocBytes;
+    roomCountByIp.clear();
+    for (const [ip, count] of recovered.roomCountByIp) {
+      roomCountByIp.set(ip, count);
+    }
+    log('rooms_restore_complete', {
+      backupVersion: parsedBackup.version,
+      savedAt: parsedBackup.savedAt,
+      skippedRooms: parsedBackup.skippedRooms,
+      roomCount: recovered.roomCount,
+      documentCount: recovered.documentCount,
+      suggestionCount: recovered.suggestionCount,
+      recoverableSessionCount: recovered.recoverableSessionCount,
+      chatMessageCount: recovered.chatMessageCount,
+      totalDocBytes: recovered.totalDocBytes,
+      ownerIpBuckets: recovered.roomCountByIp.size
+    });
+  } catch (e) {
+    const corruptPath = getCorruptBackupPath(BACKUP_FILE);
+    try {
+      fs.renameSync(BACKUP_FILE, corruptPath);
+      log('backup_quarantined', { backupFile: BACKUP_FILE, corruptPath });
+    } catch (renameError) {
+      log('backup_quarantine_error', { error: String(renameError) });
+    }
+    log('error', { message: 'Failed to load rooms backup', error: String(e) });
   }
 }
 
@@ -193,31 +315,40 @@ if (certPath && keyPath) {
 // Load rooms from backup on startup
 loadRooms();
 
+const queueRoomSave = createSerialTaskRunner(
+  async () => {
+    if (rooms.size === 0) {
+      return;
+    }
+    await saveRooms();
+  },
+  error => {
+    log('rooms_save_error', { error: error instanceof Error ? error.message : String(error) });
+  }
+);
+
 // Auto-save rooms every 30 seconds
 setInterval(() => {
-  if (rooms.size > 0) {
-    void saveRooms();
-  }
+  void queueRoomSave();
 }, 30_000);
 
 // Save rooms on shutdown (sync fallback for process exit)
 function saveRoomsSync(): void {
-  const data: Record<string, any> = {};
-  for (const [roomId, room] of rooms.entries()) {
-    data[roomId] = {
-      roomId: room.roomId,
-      ownerId: room.ownerId,
-      participants: Array.from(room.participants.entries()),
-      documents: Array.from(room.documents.entries()),
-      suggestions: Array.from(room.suggestions.entries()),
-      mode: room.mode,
-      secretHash: room.secretHash,
-      chat: room.chat
-    };
-  }
+  const data = buildPersistedRoomsSnapshot();
+  const metrics = buildCurrentRecoveryMetrics();
+  const savedAt = Date.now();
   const tmpFile = BACKUP_FILE + '.tmp';
-  fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2));
+  fs.writeFileSync(tmpFile, serializeRoomsBackup(data, savedAt));
   fs.renameSync(tmpFile, BACKUP_FILE);
+  log('rooms_saved_sync', {
+    roomCount: metrics.roomCount,
+    documentCount: metrics.documentCount,
+    suggestionCount: metrics.suggestionCount,
+    recoverableSessionCount: metrics.recoverableSessionCount,
+    chatMessageCount: metrics.chatMessageCount,
+    totalDocBytes: metrics.totalDocBytes,
+    savedAt
+  });
 }
 
 process.on('SIGTERM', () => {
@@ -234,7 +365,6 @@ process.on('SIGINT', () => {
 
 // Idle room cleanup: remove rooms with no connections every 5 minutes
 const IDLE_ROOM_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-const roomLastActivity = new Map<string, number>();
 
 setInterval(() => {
   const now = Date.now();
@@ -259,6 +389,8 @@ setInterval(() => {
   joinLimiter.cleanup();
   chatLimiter.cleanup();
   suggestionLimiter.cleanup();
+  cursorLimiter.cleanup();
+  activityLimiter.cleanup();
 }, 5 * 60 * 1000);
 
 
@@ -289,11 +421,11 @@ wss.on('connection', (ws, request) => {
         return;
       }
 
-      let message: ClientToServerMessage;
+      let message: unknown;
       if (Buffer.isBuffer(payload) || payload instanceof Uint8Array || Array.isArray(payload)) {
-        message = unpack(payload as Buffer);
+        message = unpack(payload as Buffer) as unknown;
       } else {
-        message = JSON.parse(payload.toString()) as ClientToServerMessage;
+        message = JSON.parse(payload.toString()) as unknown;
       }
       handleMessage(context, message);
     } catch (error) {
@@ -321,58 +453,8 @@ wss.on('connection', (ws, request) => {
   ws.on('close', () => clearInterval(pingTimer));
 });
 
-/** Validates that a client message has the required shape before processing. */
-function validateMessage(msg: unknown): msg is ClientToServerMessage {
-  if (typeof msg !== 'object' || msg === null || !('type' in msg)) {
-    return false;
-  }
-  const m = msg as Record<string, unknown>;
-  const str = (v: unknown): v is string => typeof v === 'string';
-  const num = (v: unknown): v is number => typeof v === 'number';
-  const optStr = (v: unknown): boolean => v === undefined || str(v);
-
-  switch (m.type) {
-    case 'createRoom':
-      return str(m.displayName) && (m.displayName as string).length <= MAX_DISPLAY_NAME_LENGTH && optStr(m.mode) && optStr(m.secret);
-    case 'joinRoom':
-      return str(m.roomId) && str(m.displayName) && (m.displayName as string).length <= MAX_DISPLAY_NAME_LENGTH && optStr(m.secret) && optStr(m.token);
-    case 'leaveRoom':
-      return true;
-    case 'updateRole':
-      return str(m.userId) && str(m.role);
-    case 'shareDocument':
-      return str(m.roomId) && str(m.docId) && str(m.originalUri) && str(m.fileName) && str(m.languageId) && str(m.text) && num(m.version);
-    case 'unshareDocument':
-      return str(m.roomId) && str(m.documentId);
-    case 'docChange':
-      return str(m.roomId) && str(m.docId) && num(m.version) && typeof m.patch === 'object' && m.patch !== null;
-    case 'suggestion':
-      return str(m.roomId) && str(m.docId) && str(m.suggestionId) && Array.isArray(m.patches) && str(m.authorId) && str(m.authorName) && num(m.createdAt);
-    case 'acceptSuggestion':
-    case 'rejectSuggestion':
-      return str(m.roomId) && str(m.suggestionId);
-    case 'setEditMode':
-      return str(m.userId) && typeof m.direct === 'boolean';
-    case 'requestFullSync':
-      return str(m.roomId) && str(m.docId);
-    case 'fullDocumentSync':
-      return str(m.roomId) && str(m.docId) && str(m.text) && num(m.version);
-    case 'rootCursor':
-    case 'cursorUpdate':
-      return str(m.roomId) && str(m.docId) && str(m.uri) && typeof m.position === 'object' && m.position !== null;
-    case 'participantActivity':
-      return str(m.roomId) && str(m.userId) && str(m.activity) && num(m.at);
-    case 'chatSend':
-      return str(m.roomId) && str(m.messageId) && str(m.content) && num(m.timestamp);
-    case 'createToken':
-      return optStr(m.label);
-    default:
-      return false;
-  }
-}
-
-function handleMessage(context: ConnectionContext, message: ClientToServerMessage): void {
-  if (!validateMessage(message)) {
+function handleMessage(context: ConnectionContext, message: unknown): void {
+  if (!validateClientMessage(message)) {
     sendError(context.ws, 'Invalid message format', 'PAYLOAD_INVALID');
     return;
   }
@@ -382,7 +464,7 @@ function handleMessage(context: ConnectionContext, message: ClientToServerMessag
       void createRoom(context, message.displayName, message.mode, message.secret);
       break;
     case 'joinRoom':
-      void joinRoom(context, message.roomId, message.displayName, message.secret, message.token);
+      void joinRoom(context, message.roomId, message.displayName, message.secret, message.token, message.sessionToken);
       break;
     case 'leaveRoom':
       cleanupRoomMembership(context);
@@ -446,15 +528,14 @@ type RoomChatMessage = {
 };
 
 async function createRoom(context: ConnectionContext, displayName: string, mode: RoomMode = 'team', secret?: string): Promise<void> {
-  if (pendingAsyncOps.has(context.userId)) {
+  if (!roomOperationGuards.beginConnectionOperation(context.userId)) {
     sendError(context.ws, 'Please wait for your previous request to complete.', 'BUSY');
     return;
   }
-  pendingAsyncOps.add(context.userId);
   try {
     await createRoomInner(context, displayName, mode, secret);
   } finally {
-    pendingAsyncOps.delete(context.userId);
+    roomOperationGuards.endConnectionOperation(context.userId);
   }
 }
 
@@ -472,10 +553,14 @@ async function createRoomInner(context: ConnectionContext, displayName: string, 
   }
 
   const roomId = generateRoomId();
+  const ownerParticipant = createOwnerParticipant(context.userId, displayName);
   const room: RoomState = {
     roomId,
     ownerId: context.userId,
+    ownerSessionToken: ownerParticipant.sessionToken,
+    ownerIp: context.ip,
     participants: new Map(),
+    recoverableSessions: new Map(),
     connections: new Map(),
     documents: new Map(),
     suggestions: new Map(),
@@ -486,118 +571,188 @@ async function createRoomInner(context: ConnectionContext, displayName: string, 
 
   rooms.set(roomId, room);
   roomCountByIp.set(ipKey, ipRoomCount + 1);
+  if (context.roomId) {
+    cleanupRoomMembership(context, 'switch');
+  }
   context.roomId = roomId;
   context.role = 'root';
   context.displayName = displayName;
 
-  const participant: ParticipantState = {
-    userId: context.userId,
-    displayName,
-    role: 'root',
-    isDirectEditMode: true
-  };
-
-  room.participants.set(participant.userId, participant);
+  room.participants.set(ownerParticipant.userId, ownerParticipant);
+  room.recoverableSessions.set(ownerParticipant.sessionToken, toRecoverableParticipant(ownerParticipant));
   room.connections.set(context.userId, context);
+  auditRoomInvariants(room, 'create_room');
 
-  send(context.ws, { type: 'roomCreated', roomId, userId: context.userId, mode: room.mode });
+  send(context.ws, {
+    type: 'roomCreated',
+    roomId,
+    userId: context.userId,
+    mode: room.mode,
+    sessionToken: ownerParticipant.sessionToken
+  });
   send(context.ws, {
     type: 'joinedRoom',
     roomId,
     userId: context.userId,
     role: 'root',
-    participants: Array.from(room.participants.values()),
-    mode: room.mode
+    participants: Array.from(room.participants.values(), toPublicParticipant),
+    mode: room.mode,
+    sessionToken: ownerParticipant.sessionToken
   });
   log('room_created', { roomId, ownerId: context.userId, mode: room.mode, hasSecret: Boolean(room.secretHash) });
 }
 
-async function joinRoom(context: ConnectionContext, roomId: string, displayName: string, secret?: string, token?: string): Promise<void> {
-  if (pendingAsyncOps.has(context.userId)) {
+async function joinRoom(
+  context: ConnectionContext,
+  roomId: string,
+  displayName: string,
+  secret?: string,
+  token?: string,
+  sessionToken?: string
+): Promise<void> {
+  if (!roomOperationGuards.beginConnectionOperation(context.userId)) {
     sendError(context.ws, 'Please wait for your previous request to complete.', 'BUSY');
     return;
   }
-  pendingAsyncOps.add(context.userId);
+  const joinClaimKey = getJoinClaimKey({
+    token,
+    sessionToken,
+    connectionId: context.userId
+  });
+  if (!roomOperationGuards.beginJoinClaim(roomId, joinClaimKey)) {
+    roomOperationGuards.endConnectionOperation(context.userId);
+    sendError(context.ws, 'A matching join request is already being processed for this room.', 'BUSY');
+    return;
+  }
   try {
-    await joinRoomInner(context, roomId, displayName, secret, token);
+    await joinRoomInner(context, roomId, displayName, secret, token, sessionToken);
   } finally {
-    pendingAsyncOps.delete(context.userId);
+    roomOperationGuards.endJoinClaim(roomId, joinClaimKey);
+    roomOperationGuards.endConnectionOperation(context.userId);
   }
 }
 
-async function joinRoomInner(context: ConnectionContext, roomId: string, displayName: string, secret?: string, token?: string): Promise<void> {
+async function joinRoomInner(
+  context: ConnectionContext,
+  roomId: string,
+  displayName: string,
+  secret?: string,
+  token?: string,
+  sessionToken?: string
+): Promise<void> {
   if (isJoinBlocked(context)) {
+    return;
+  }
+  if (context.roomId === roomId) {
+    sendError(context.ws, 'You are already connected to that room.', 'ALREADY_IN_ROOM');
     return;
   }
   const room = rooms.get(roomId);
   if (!room) {
-    recordFailedJoin(context);
-    sendError(context.ws, 'Room not found', 'ROOM_NOT_FOUND');
+    await denyJoinAttempt(context, roomId, 'ROOM_NOT_FOUND');
     return;
   }
 
-  if (token) {
-    // Token-based auth: single-use invite token
-    const tokenData = inviteTokens.get(token);
-    const valid = tokenData &&
-      tokenData.roomId === roomId &&
-      Date.now() - tokenData.createdAt <= TOKEN_TTL_MS;
-    if (!valid) {
-      recordFailedJoin(context);
-      sendError(context.ws, 'Invalid or expired invite token.', 'TOKEN_INVALID');
-      return;
-    }
-    inviteTokens.delete(token); // single-use
-  } else if (room.secretHash) {
-    // Password-based auth
-    if (!secret) {
-      recordFailedJoin(context);
-      sendError(context.ws, 'Room requires a secret', 'ROOM_SECRET_REQUIRED');
-      return;
-    }
-    if (!await verifySecret(secret, roomId, room.secretHash)) {
-      recordFailedJoin(context);
-      sendError(context.ws, 'Room secret is invalid', 'ROOM_SECRET_INVALID');
-      return;
-    }
+  const joinAccess = await validateJoinAccess({
+    roomId,
+    roomSecretHash: room.secretHash,
+    secret,
+    token,
+    tokenRecord: token ? inviteTokens.get(token) : undefined,
+    now: Date.now(),
+    tokenTtlMs: TOKEN_TTL_MS,
+    verifySecret
+  });
+  if (!joinAccess.ok) {
+    await denyJoinAttempt(context, roomId, joinAccess.code);
+    return;
+  }
+  if (token && joinAccess.consumeToken) {
+    inviteTokens.delete(token);
   }
 
   resetFailedJoin(context);
 
+  if (context.roomId) {
+    cleanupRoomMembership(context, 'switch');
+  }
+
   context.roomId = roomId;
-  // Auto-assign viewer role for large rooms (40+ participants) or classroom mode
-  const participantCount = room.participants.size;
-  const isLargeRoom = participantCount >= 40;
-  const defaultRole: Role = room.mode === 'classroom' || isLargeRoom ? 'viewer' : 'collaborator';
-  context.role = defaultRole;
   context.displayName = displayName;
 
-  const participant: ParticipantState = {
+  const resolvedJoin = resolveJoinParticipant({
     userId: context.userId,
     displayName,
-    role: defaultRole,
-    isDirectEditMode: defaultRole === 'collaborator' ? false : undefined
-  };
+    mode: room.mode,
+    activeParticipantCount: room.participants.size,
+    ownerSessionToken: room.ownerSessionToken,
+    activeParticipants: room.participants.values(),
+    recoverableSessions: room.recoverableSessions,
+    requestedSessionToken: sessionToken
+  });
+  const participant = resolvedJoin.participant;
+
+  if (resolvedJoin.previousUserId) {
+    const previousConnection = room.connections.get(resolvedJoin.previousUserId);
+    if (previousConnection && previousConnection.ws !== context.ws) {
+      previousConnection.roomId = undefined;
+      previousConnection.role = undefined;
+      send(previousConnection.ws, { type: 'error', message: 'Your session was resumed on another connection.' });
+      previousConnection.ws.close();
+    }
+    room.participants.delete(resolvedJoin.previousUserId);
+    room.connections.delete(resolvedJoin.previousUserId);
+  }
+
+  if (participant.sessionToken === room.ownerSessionToken) {
+    room.ownerId = context.userId;
+  }
 
   room.participants.set(participant.userId, participant);
+  room.recoverableSessions.set(participant.sessionToken, toRecoverableParticipant(participant));
   room.connections.set(participant.userId, context);
+  context.role = participant.role;
+  auditRoomInvariants(room, 'join_room');
 
   send(context.ws, {
     type: 'joinedRoom',
     roomId,
     userId: context.userId,
-    role: defaultRole,
-    participants: Array.from(room.participants.values()),
-    mode: room.mode
+    role: participant.role,
+    participants: Array.from(room.participants.values(), toPublicParticipant),
+    mode: room.mode,
+    sessionToken: participant.sessionToken
   });
 
-  broadcast(room, { type: 'participantJoined', participant }, context.ws);
+  broadcast(room, { type: 'participantJoined', participant: toPublicParticipant(participant) }, context.ws);
   replayDocumentsToConnection(room, context);
-  log('room_joined', { roomId, userId: context.userId, role: defaultRole, mode: room.mode, ip: context.ip });
+  log('room_joined', {
+    roomId,
+    userId: context.userId,
+    role: participant.role,
+    mode: room.mode,
+    ip: context.ip,
+    reclaimedSession: resolvedJoin.reclaimedSession
+  });
+}
+
+async function denyJoinAttempt(
+  context: ConnectionContext,
+  roomId: string,
+  reason: JoinFailureReason
+): Promise<void> {
+  const blocked = recordFailedJoin(context);
+  log('join_denied', { ip: context.ip, roomId, reason, blocked });
+  if (blocked) {
+    return;
+  }
+  await new Promise(resolve => setTimeout(resolve, JOIN_FAILURE_DELAY_MS));
+  const response = getJoinFailureResponse(reason);
+  sendError(context.ws, response.message, response.code);
 }
 
 function cleanupConnection(context: ConnectionContext): void {
-  cleanupRoomMembership(context);
+  cleanupRoomMembership(context, 'disconnect');
 }
 
 function deleteRoom(roomId: string): void {
@@ -609,17 +764,35 @@ function deleteRoom(roomId: string): void {
   }
   if (totalDocBytes < 0) { totalDocBytes = 0; }
   // Decrement per-IP room counter using the owner's connection IP
-  const ownerCtx = room.connections.get(room.ownerId);
-  if (ownerCtx?.ip) {
-    const count = roomCountByIp.get(ownerCtx.ip) ?? 1;
-    if (count <= 1) { roomCountByIp.delete(ownerCtx.ip); }
-    else { roomCountByIp.set(ownerCtx.ip, count - 1); }
+  if (room.ownerIp) {
+    const count = roomCountByIp.get(room.ownerIp) ?? 1;
+    if (count <= 1) { roomCountByIp.delete(room.ownerIp); }
+    else { roomCountByIp.set(room.ownerIp, count - 1); }
   }
   rooms.delete(roomId);
   roomLastActivity.delete(roomId);
 }
 
-function cleanupRoomMembership(context: ConnectionContext): void {
+function syncRecoverableParticipant(room: RoomState, participant: ParticipantState): void {
+  room.recoverableSessions.set(participant.sessionToken, toRecoverableParticipant(participant));
+}
+
+function auditRoomInvariants(room: RoomState, source: string): void {
+  const issues = getRoomInvariantViolations(room);
+  if (issues.length === 0) {
+    return;
+  }
+  log('room_invariant_violation', {
+    roomId: room.roomId,
+    source,
+    issues
+  });
+}
+
+function cleanupRoomMembership(
+  context: ConnectionContext,
+  reason: 'disconnect' | 'leave' | 'switch' = 'leave'
+): void {
   if (!context.roomId) {
     return;
   }
@@ -627,20 +800,40 @@ function cleanupRoomMembership(context: ConnectionContext): void {
   const room = rooms.get(context.roomId);
   if (!room) {
     context.roomId = undefined;
+    context.role = undefined;
     return;
   }
 
+  const participant = room.participants.get(context.userId);
   room.participants.delete(context.userId);
   room.connections.delete(context.userId);
-  broadcast(room, { type: 'participantLeft', userId: context.userId }, context.ws);
+  if (participant) {
+    broadcast(room, { type: 'participantLeft', userId: context.userId }, context.ws);
+    if (reason !== 'disconnect') {
+      room.recoverableSessions.delete(participant.sessionToken);
+    }
+  }
 
   if (room.ownerId === context.userId) {
-    for (const connection of room.connections.values()) {
-      send(connection.ws, { type: 'error', message: 'Room closed by root user.' });
-      connection.ws.close();
+    if (reason === 'disconnect') {
+      room.ownerId = getRestoredOwnerId(room.ownerSessionToken);
+      log('room_owner_disconnected', { roomId: room.roomId });
+    } else {
+      const peersToNotify = prepareRoomClosure(room.connections.values(), context.userId);
+      room.connections.clear();
+      room.participants.clear();
+      room.recoverableSessions.clear();
+      for (const connection of peersToNotify) {
+        send(connection.ws as WebSocket, { type: 'error', message: 'Room closed by root user.' });
+        connection.ws.close();
+      }
+      deleteRoom(room.roomId);
+      log('room_closed', { roomId: room.roomId, reason });
     }
-    deleteRoom(room.roomId);
-    log('room_closed', { roomId: room.roomId });
+  }
+
+  if (rooms.has(room.roomId)) {
+    auditRoomInvariants(room, `cleanup:${reason}`);
   }
 
   context.roomId = undefined;
@@ -650,9 +843,10 @@ function cleanupRoomMembership(context: ConnectionContext): void {
 function updateRole(context: ConnectionContext, userId: string, role: Role): void {
   const room = getRoomForContext(context);
   if (!room) {
+    sendError(context.ws, 'Join a room before changing roles.', 'ROOM_STATE_INVALID');
     return;
   }
-  if (room.ownerId !== context.userId) {
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
     sendError(context.ws, 'Only the room owner can change roles.', 'FORBIDDEN');
     return;
   }
@@ -665,55 +859,65 @@ function updateRole(context: ConnectionContext, userId: string, role: Role): voi
 
   participant.role = role;
   participant.isDirectEditMode = role === 'collaborator' ? participant.isDirectEditMode ?? false : false;
+  syncRecoverableParticipant(room, participant);
 
   const targetConnection = room.connections.get(userId);
   if (targetConnection) {
     targetConnection.role = role;
   }
 
+  auditRoomInvariants(room, 'update_role');
   broadcast(room, { type: 'roleUpdated', userId, role });
 }
 
 function setEditMode(context: ConnectionContext, userId: string, direct: boolean): void {
   const room = getRoomForContext(context);
   if (!room) {
+    sendError(context.ws, 'Join a room before changing edit mode.', 'ROOM_STATE_INVALID');
     return;
   }
-  if (context.userId !== room.ownerId && context.userId !== userId) {
+  if (!canChangeEditMode(context.userId, room.ownerId, userId)) {
+    sendError(context.ws, 'Only the room owner or the target participant can change edit mode.', 'FORBIDDEN');
     return;
   }
   const participant = room.participants.get(userId);
   if (!participant || participant.role !== 'collaborator') {
+    sendError(context.ws, 'Target collaborator not found.', 'TARGET_NOT_FOUND');
     return;
   }
   participant.isDirectEditMode = direct;
+  syncRecoverableParticipant(room, participant);
   broadcast(room, { type: 'editModeUpdated', userId, isDirectEditMode: direct });
 }
 
 function handleShareDocument(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'shareDocument' }>): void {
   const room = getRoomForContext(context);
-  if (!room || context.userId !== room.ownerId) {
+  if (!room) {
+    rejectTrackedMessage(context.ws, message, 'Join a room before sharing documents.', 'ROOM_STATE_INVALID');
+    return;
+  }
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
+    rejectTrackedMessage(context.ws, message, 'Only the room owner can share documents.', 'FORBIDDEN');
     return;
   }
 
   if (Buffer.byteLength(message.text, 'utf8') > MAX_DOCUMENT_BYTES) {
-    sendError(context.ws, 'Document is too large to share (max 2 MB).', 'DOCUMENT_TOO_LARGE');
+    rejectTrackedMessage(context.ws, message, 'Document is too large to share (max 2 MB).', 'DOCUMENT_TOO_LARGE');
     return;
   }
 
   if (!room.documents.has(message.docId) && room.documents.size >= MAX_DOCUMENTS_PER_ROOM) {
-    sendError(context.ws, `Room document limit reached (max ${MAX_DOCUMENTS_PER_ROOM}).`, 'DOCUMENT_LIMIT');
+    rejectTrackedMessage(context.ws, message, `Room document limit reached (max ${MAX_DOCUMENTS_PER_ROOM}).`, 'DOCUMENT_LIMIT');
     return;
   }
 
-  const textBytes = Buffer.byteLength(message.text, 'utf8');
   const existing = room.documents.get(message.docId);
-  const oldBytes = existing ? Buffer.byteLength(existing.text, 'utf8') : 0;
-  if (totalDocBytes - oldBytes + textBytes > MAX_TOTAL_DOC_BYTES) {
-    sendError(context.ws, 'Server memory limit reached. Cannot share more documents.', 'MEMORY_LIMIT');
+  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, existing?.text ?? '', message.text);
+  if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
+    rejectTrackedMessage(context.ws, message, 'Server memory limit reached. Cannot share more documents.', 'MEMORY_LIMIT');
     return;
   }
-  totalDocBytes += textBytes - oldBytes;
+  totalDocBytes = nextTotalDocBytes;
 
   const doc: DocumentState = {
     docId: message.docId,
@@ -737,46 +941,61 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
     text: message.text,
     version: message.version
   }, context.ws);
+  sendAckForMessage(context.ws, message);
 
   log('doc_shared', { roomId: room.roomId, docId: message.docId, ownerId: room.ownerId, fileName: message.fileName });
 }
 
 function handleUnshareDocument(context: ConnectionContext, documentId: string): void {
   const room = getRoomForContext(context);
-  if (!room || context.userId !== room.ownerId) {
+  const message: Extract<ClientToServerMessage, { type: 'unshareDocument' }> = {
+    type: 'unshareDocument',
+    roomId: context.roomId ?? '',
+    documentId
+  };
+  if (!room) {
+    rejectTrackedMessage(context.ws, message, 'Join a room before unsharing documents.', 'ROOM_STATE_INVALID');
+    return;
+  }
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
+    rejectTrackedMessage(context.ws, message, 'Only the room owner can unshare documents.', 'FORBIDDEN');
     return;
   }
   const removed = room.documents.get(documentId);
   if (!removed) {
+    rejectTrackedMessage(context.ws, { ...message, roomId: room.roomId }, 'Document not found.', 'TARGET_NOT_FOUND');
     return;
   }
   totalDocBytes -= Buffer.byteLength(removed.text, 'utf8');
   room.documents.delete(documentId);
   broadcast(room, { type: 'documentUnshared', roomId: room.roomId, documentId }, context.ws);
+  sendAckForMessage(context.ws, { type: 'unshareDocument', roomId: room.roomId, documentId });
   log('doc_unshared', { roomId: room.roomId, docId: documentId, ownerId: room.ownerId });
 }
 
 function handleDocChange(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'docChange' }>): void {
   const room = getRoomForContext(context);
   if (!room || !context.role) {
+    rejectTrackedMessage(context.ws, message, 'Join a room before editing shared documents.', 'ROOM_STATE_INVALID');
     return;
   }
-
-  if (context.role === 'viewer') {
-    sendError(context.ws, 'Viewers are read-only.', 'FORBIDDEN');
-    return;
-  }
-
-  if (context.role === 'collaborator') {
-    const participant = room.participants.get(context.userId);
-    if (!participant?.isDirectEditMode) {
-      sendError(context.ws, 'Collaborator is in suggestion mode.', 'FORBIDDEN');
+  const participant = room.participants.get(context.userId);
+  if (!canEditSharedDocument(context.role, participant)) {
+    if (context.role === 'viewer') {
+      rejectTrackedMessage(context.ws, message, 'Viewers are read-only.', 'FORBIDDEN');
       return;
     }
+    if (context.role === 'collaborator') {
+      rejectTrackedMessage(context.ws, message, 'Collaborator is in suggestion mode.', 'FORBIDDEN');
+      return;
+    }
+    rejectTrackedMessage(context.ws, message, 'Editing is not allowed in the current room state.', 'FORBIDDEN');
+    return;
   }
 
   const doc = room.documents.get(message.docId);
   if (!doc) {
+    rejectTrackedMessage(context.ws, message, 'Document not found.', 'TARGET_NOT_FOUND');
     return;
   }
 
@@ -791,7 +1010,8 @@ function handleDocChange(context: ConnectionContext, message: Extract<ClientToSe
       doc.patchHistory,
     );
     if (!transformed) {
-      // Patch fully subsumed by concurrent edits — silently drop
+      // Patch fully subsumed by concurrent edits — acknowledge it so reconnect queues do not replay forever.
+      sendAckForMessage(context.ws, message);
       return;
     }
     patchToApply = transformed;
@@ -800,11 +1020,16 @@ function handleDocChange(context: ConnectionContext, message: Extract<ClientToSe
   const baseText = doc.text;
   const updatedText = applyPatch(doc.text, patchToApply);
   if (!updatedText) {
-    sendError(context.ws, 'Invalid patch payload', 'PATCH_INVALID');
+    rejectTrackedMessage(context.ws, message, 'Invalid patch payload', 'PATCH_INVALID');
     return;
   }
 
-  totalDocBytes += Buffer.byteLength(updatedText, 'utf8') - Buffer.byteLength(baseText, 'utf8');
+  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, baseText, updatedText);
+  if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
+    rejectTrackedMessage(context.ws, message, 'Server memory limit reached. Cannot apply document change.', 'MEMORY_LIMIT');
+    return;
+  }
+  totalDocBytes = nextTotalDocBytes;
   doc.version += 1;
   const newVersion = doc.version;
 
@@ -830,6 +1055,7 @@ function handleDocChange(context: ConnectionContext, message: Extract<ClientToSe
     patch: patchToApply,
     authorId: context.userId
   }, context.ws);
+  sendAckForMessage(context.ws, message);
 }
 
 function handleSuggestion(
@@ -838,85 +1064,102 @@ function handleSuggestion(
 ): void {
   const room = getRoomForContext(context);
   if (!room) {
+    rejectTrackedMessage(context.ws, message, 'Join a room before sending suggestions.', 'ROOM_STATE_INVALID');
+    return;
+  }
+  if (room.roomId !== message.roomId) {
+    rejectTrackedMessage(context.ws, message, 'Suggestion room does not match your active room.', 'ROOM_STATE_INVALID');
     return;
   }
 
   const suggestKey = context.ip ?? context.userId;
   if (suggestionLimiter.isBlocked(suggestKey)) {
-    sendError(context.ws, 'Too many suggestions. Please wait.', 'RATE_LIMITED');
+    rejectTrackedMessage(context.ws, message, 'Too many suggestions. Please wait.', 'RATE_LIMITED');
     return;
   }
   suggestionLimiter.recordFailure(suggestKey);
 
   if (room.suggestions.size >= MAX_SUGGESTIONS_PER_ROOM) {
-    sendError(context.ws, `Suggestion limit reached (max ${MAX_SUGGESTIONS_PER_ROOM}).`, 'SUGGESTION_LIMIT');
+    rejectTrackedMessage(context.ws, message, `Suggestion limit reached (max ${MAX_SUGGESTIONS_PER_ROOM}).`, 'SUGGESTION_LIMIT');
     return;
   }
 
-  room.suggestions.set(message.suggestionId, {
-    suggestionId: message.suggestionId,
-    roomId: message.roomId,
-    docId: message.docId,
-    authorId: message.authorId,
-    authorName: message.authorName,
-    patches: message.patches,
-    createdAt: message.createdAt,
-    status: 'pending'
-  });
+  const participant = room.participants.get(context.userId);
+  if (!canSubmitSuggestion(participant)) {
+    rejectTrackedMessage(context.ws, message, 'Only collaborators in suggestion mode can submit suggestions.', 'FORBIDDEN');
+    return;
+  }
+  if (!room.documents.has(message.docId)) {
+    rejectTrackedMessage(context.ws, message, 'Document not found.', 'TARGET_NOT_FOUND');
+    return;
+  }
+
+  const suggestion = createPendingSuggestion(message, participant);
+  room.suggestions.set(message.suggestionId, suggestion);
 
   broadcast(room, {
     type: 'newSuggestion',
-    suggestion: {
-      suggestionId: message.suggestionId,
-      roomId: message.roomId,
-      docId: message.docId,
-      authorId: message.authorId,
-      authorName: message.authorName,
-      patches: message.patches,
-      createdAt: message.createdAt,
-      status: 'pending'
-    }
+    suggestion
   }, undefined);
+  sendAckForMessage(context.ws, message);
 
-  log('suggestion_created', { roomId: room.roomId, docId: message.docId, suggestionId: message.suggestionId, authorId: message.authorId });
+  log('suggestion_created', { roomId: room.roomId, docId: message.docId, suggestionId: message.suggestionId, authorId: suggestion.authorId });
 }
 
 function handleSuggestionDecision(context: ConnectionContext, suggestionId: string, accepted: boolean): void {
   const room = getRoomForContext(context);
-  if (!room || context.userId !== room.ownerId) {
+  if (!room) {
+    sendError(context.ws, 'Join a room before reviewing suggestions.', 'ROOM_STATE_INVALID');
+    sendAckKey(context.ws, `suggest:${suggestionId}`);
+    return;
+  }
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
+    sendError(context.ws, 'Only the room owner can review suggestions.', 'FORBIDDEN');
+    sendAckKey(context.ws, `suggest:${suggestionId}`);
     return;
   }
 
   const suggestion = room.suggestions.get(suggestionId);
   if (!suggestion) {
+    sendAckKey(context.ws, `suggest:${suggestionId}`);
     return;
   }
 
   if (accepted) {
     const doc = room.documents.get(suggestion.docId);
     if (!doc) {
+      rejectTrackedMessage(context.ws, { type: 'acceptSuggestion', roomId: room.roomId, suggestionId }, 'Document not found.', 'TARGET_NOT_FOUND');
       return;
     }
 
-    const updatedText = applyPatches(doc.text, suggestion.patches);
-    if (!updatedText) {
-      sendError(context.ws, 'Invalid suggestion payload', 'PATCH_INVALID');
+    const appliedSuggestion = applySuggestionPatches(doc.text, doc.version, suggestion.patches, suggestion.authorId);
+    if (!appliedSuggestion) {
+      rejectTrackedMessage(context.ws, { type: 'acceptSuggestion', roomId: room.roomId, suggestionId }, 'Invalid suggestion payload', 'PATCH_INVALID');
       return;
     }
 
-    doc.text = updatedText;
-    let version = doc.version;
-    for (const patch of suggestion.patches) {
-      version += 1;
+    const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, doc.text, appliedSuggestion.text);
+    if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
+      rejectTrackedMessage(context.ws, { type: 'acceptSuggestion', roomId: room.roomId, suggestionId }, 'Server memory limit reached. Cannot accept suggestion.', 'MEMORY_LIMIT');
+      return;
+    }
+
+    totalDocBytes = nextTotalDocBytes;
+    doc.text = appliedSuggestion.text;
+    doc.version = appliedSuggestion.version;
+    doc.patchHistory.push(...appliedSuggestion.history);
+    if (doc.patchHistory.length > MAX_PATCH_HISTORY) {
+      doc.patchHistory.splice(0, doc.patchHistory.length - MAX_PATCH_HISTORY);
+    }
+    for (const entry of appliedSuggestion.history) {
       broadcast(room, {
         type: 'docChangeBroadcast',
         docId: suggestion.docId,
-        version,
-        patch,
-        authorId: context.userId
+        version: entry.version,
+        patch: entry.patch,
+        authorId: suggestion.authorId
       }, context.ws);
     }
-    doc.version = version;
     room.documents.set(suggestion.docId, doc);
   }
 
@@ -926,6 +1169,7 @@ function handleSuggestionDecision(context: ConnectionContext, suggestionId: stri
     suggestionId,
     docId: suggestion.docId
   });
+  sendAckKey(context.ws, `suggest:${suggestionId}`);
 
   log(accepted ? 'suggestion_accepted' : 'suggestion_rejected', {
     roomId: room.roomId,
@@ -937,10 +1181,12 @@ function handleSuggestionDecision(context: ConnectionContext, suggestionId: stri
 function handleRequestFullSync(context: ConnectionContext, roomId: string, docId: string): void {
   const room = getRoomForContext(context);
   if (!room || room.roomId !== roomId) {
+    rejectTrackedMessage(context.ws, { type: 'requestFullSync', roomId, docId }, 'Room does not match your active session.', 'ROOM_STATE_INVALID');
     return;
   }
   const ownerConnection = room.connections.get(room.ownerId);
   if (!ownerConnection) {
+    rejectTrackedMessage(context.ws, { type: 'requestFullSync', roomId, docId }, 'Room owner is unavailable for full sync.', 'OWNER_UNAVAILABLE');
     return;
   }
   send(ownerConnection.ws, {
@@ -948,6 +1194,7 @@ function handleRequestFullSync(context: ConnectionContext, roomId: string, docId
     roomId,
     docId
   });
+  sendAckForMessage(context.ws, { type: 'requestFullSync', roomId, docId });
 }
 
 function handleFullDocumentSync(
@@ -955,14 +1202,25 @@ function handleFullDocumentSync(
   message: Extract<ClientToServerMessage, { type: 'fullDocumentSync' }>
 ): void {
   const room = getRoomForContext(context);
-  if (!room || context.userId !== room.ownerId || room.roomId !== message.roomId) {
+  if (!room || room.roomId !== message.roomId) {
+    rejectTrackedMessage(context.ws, message, 'Room does not match your active session.', 'ROOM_STATE_INVALID');
+    return;
+  }
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
+    rejectTrackedMessage(context.ws, message, 'Only the room owner can publish a full sync.', 'FORBIDDEN');
     return;
   }
   const doc = room.documents.get(message.docId);
   if (!doc) {
+    rejectTrackedMessage(context.ws, message, 'Document not found.', 'TARGET_NOT_FOUND');
     return;
   }
-  totalDocBytes += Buffer.byteLength(message.text, 'utf8') - Buffer.byteLength(doc.text, 'utf8');
+  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, doc.text, message.text);
+  if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
+    rejectTrackedMessage(context.ws, message, 'Server memory limit reached. Cannot apply full sync.', 'MEMORY_LIMIT');
+    return;
+  }
+  totalDocBytes = nextTotalDocBytes;
   doc.text = message.text;
   doc.version = message.version;
   doc.patchHistory = []; // reset history on full sync
@@ -975,6 +1233,7 @@ function handleFullDocumentSync(
     text: message.text,
     version: message.version
   }, context.ws);
+  sendAckForMessage(context.ws, message);
 }
 
 function handleRootCursor(
@@ -982,7 +1241,12 @@ function handleRootCursor(
   message: Extract<ClientToServerMessage, { type: 'rootCursor' }>
 ): void {
   const room = getRoomForContext(context);
-  if (!room || context.userId !== room.ownerId || room.roomId !== message.roomId) {
+  if (!room || room.roomId !== message.roomId) {
+    sendError(context.ws, 'Room does not match your active session.', 'ROOM_STATE_INVALID');
+    return;
+  }
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
+    sendError(context.ws, 'Only the room owner can broadcast the root cursor.', 'FORBIDDEN');
     return;
   }
 
@@ -1004,6 +1268,12 @@ function handleParticipantActivity(
     return;
   }
 
+  const activityKey = `${room.roomId}:${context.userId}`;
+  if (activityLimiter.isBlocked(activityKey)) {
+    return;
+  }
+  activityLimiter.recordFailure(activityKey);
+
   broadcast(room, {
     type: 'participantActivity',
     roomId: room.roomId,
@@ -1016,32 +1286,35 @@ function handleParticipantActivity(
 function handleChatSend(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'chatSend' }>): void {
   const room = getRoomForContext(context);
   if (!room || room.roomId !== message.roomId) {
+    rejectTrackedMessage(context.ws, message, 'Room does not match your active session.', 'ROOM_STATE_INVALID');
     return;
   }
 
   const participant = room.participants.get(context.userId);
   if (!participant) {
+    rejectTrackedMessage(context.ws, message, 'Participant is not active in this room.', 'ROOM_STATE_INVALID');
     return;
   }
 
-  if (participant.role === 'viewer') {
-    sendError(context.ws, 'Viewers cannot send messages.', 'FORBIDDEN');
+  if (!canSendChat(participant)) {
+    rejectTrackedMessage(context.ws, message, 'Viewers cannot send messages.', 'FORBIDDEN');
     return;
   }
 
   const chatKey = context.ip ?? context.userId;
   if (chatLimiter.isBlocked(chatKey)) {
-    sendError(context.ws, 'You are sending messages too fast. Please wait.', 'RATE_LIMITED');
+    rejectTrackedMessage(context.ws, message, 'You are sending messages too fast. Please wait.', 'RATE_LIMITED');
     return;
   }
   chatLimiter.recordFailure(chatKey);
 
   const trimmed = message.content.trim();
   if (!trimmed) {
+    rejectTrackedMessage(context.ws, message, 'Message cannot be empty.', 'MESSAGE_EMPTY');
     return;
   }
   if (trimmed.length > 4096) {
-    sendError(context.ws, 'Message is too long (max 4096 characters).', 'MESSAGE_TOO_LONG');
+    rejectTrackedMessage(context.ws, message, 'Message is too long (max 4096 characters).', 'MESSAGE_TOO_LONG');
     return;
   }
 
@@ -1072,13 +1345,22 @@ function handleChatSend(context: ConnectionContext, message: Extract<ClientToSer
   };
 
   broadcast(room, broadcastMsg);
+  sendAckForMessage(context.ws, message);
   log('chat_message', { roomId: room.roomId, userId: participant.userId, role: participant.role });
 }
 
 function handleCreateToken(context: ConnectionContext, label?: string): void {
   const room = getRoomForContext(context);
-  if (!room || context.userId !== room.ownerId) {
+  if (!room) {
+    sendError(context.ws, 'Join a room before generating invite tokens.', 'ROOM_STATE_INVALID');
+    return;
+  }
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
     sendError(context.ws, 'Only the room owner can generate invite tokens.', 'FORBIDDEN');
+    return;
+  }
+  if (label && label.length > MAX_INVITE_LABEL_LENGTH) {
+    sendError(context.ws, `Invite labels must be ${MAX_INVITE_LABEL_LENGTH} characters or fewer.`, 'LABEL_TOO_LONG');
     return;
   }
   const token = randomBytes(16).toString('hex');
@@ -1103,8 +1385,26 @@ function send(ws: WebSocket, message: ServerToClientMessage): void {
   ws.send(pack(message));
 }
 
+function sendAckForMessage(ws: WebSocket, message: ClientToServerMessage): void {
+  const key = getClientMessageAckKey(message);
+  if (!key) {
+    return;
+  }
+  sendAckKey(ws, key);
+}
+
+function sendAckKey(ws: WebSocket, key: string): void {
+  send(ws, { type: 'ack', key });
+}
+
 function sendError(ws: WebSocket, message: string, code?: string): void {
   send(ws, { type: 'error', message, code });
+}
+
+function rejectTrackedMessage(ws: WebSocket, message: ClientToServerMessage, errorMessage: string, code: string): void {
+  for (const response of buildTrackedErrorResponses(message, errorMessage, code)) {
+    send(ws, response);
+  }
 }
 
 function replayDocumentsToConnection(room: RoomState, context: ConnectionContext): void {
@@ -1120,6 +1420,15 @@ function replayDocumentsToConnection(room: RoomState, context: ConnectionContext
       version: doc.version
     });
   }
+  replaySuggestionsToConnection(room, context);
+}
+
+function replaySuggestionsToConnection(room: RoomState, context: ConnectionContext): void {
+  const suggestions = getPendingSuggestionsForRole(room.suggestions.values(), context.role);
+  if (!suggestions.length) {
+    return;
+  }
+  send(context.ws, { type: 'syncSuggestions', suggestions });
 }
 
 function getRoomForContext(context: ConnectionContext): RoomState | undefined {
@@ -1168,7 +1477,7 @@ function isJoinBlocked(context: ConnectionContext): boolean {
   return false;
 }
 
-function recordFailedJoin(context: ConnectionContext): void {
+function recordFailedJoin(context: ConnectionContext): boolean {
   const key = context.ip ?? 'unknown';
   const blocked = joinLimiter.recordFailure(key);
   if (blocked) {
@@ -1176,6 +1485,7 @@ function recordFailedJoin(context: ConnectionContext): void {
     context.ws.close();
     log('join_blocked', { ip: key });
   }
+  return blocked;
 }
 
 function resetFailedJoin(context: ConnectionContext): void {
@@ -1209,6 +1519,12 @@ function handleCursorUpdate(
   }
   const participant = room.participants.get(context.userId);
   if (!participant) return;
+
+  const cursorKey = `${room.roomId}:${context.userId}`;
+  if (cursorLimiter.isBlocked(cursorKey)) {
+    return;
+  }
+  cursorLimiter.recordFailure(cursorKey);
 
   broadcast(
     room,

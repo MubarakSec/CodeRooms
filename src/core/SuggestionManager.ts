@@ -61,21 +61,41 @@ export class SuggestionManager {
     return Array.from(this.suggestions.values());
   }
 
+  replaceAll(suggestions: Suggestion[]): void {
+    this.suggestions.clear();
+    for (const suggestion of suggestions) {
+      if (suggestion.status === 'pending') {
+        this.suggestions.set(suggestion.suggestionId, suggestion);
+      }
+    }
+    this.refreshDecorations();
+    this.emitChange();
+  }
+
   clearAll(): void {
     this.suggestions.clear();
     this.refreshDecorations();
     this.emitChange();
   }
 
-  handleSuggestion(suggestion: Suggestion): void {
+  async rejectAllPending(): Promise<number> {
+    const pending = Array.from(this.suggestions.values());
+    for (const suggestion of pending) {
+      await this.rejectHandler?.(suggestion);
+    }
+    return pending.length;
+  }
+
+  handleSuggestion(suggestion: Suggestion): boolean {
     if (!this.roomState.isRoot() || suggestion.status !== 'pending') {
-      return;
+      return false;
     }
 
+    const alreadyPresent = this.suggestions.has(suggestion.suggestionId);
     this.suggestions.set(suggestion.suggestionId, suggestion);
     this.refreshDecorations();
     this.emitChange();
-    void this.promptDecision(suggestion);
+    return !alreadyPresent;
   }
 
   handleSuggestionAccepted(suggestionId: string): void {
@@ -91,20 +111,6 @@ export class SuggestionManager {
       this.emitChange();
     }
   }
-
-  private async promptDecision(suggestion: Suggestion): Promise<void> {
-    const label = `${suggestion.authorName} suggested a change`;
-    const choice = await vscode.window.showInformationMessage(label, 'Accept', 'Reject');
-    if (choice === 'Accept') {
-      await this.acceptHandler?.(suggestion);
-    } else if (choice === 'Reject') {
-      await this.rejectHandler?.(suggestion);
-    }
-    this.suggestions.delete(suggestion.suggestionId);
-    this.refreshDecorations();
-    this.emitChange();
-  }
-
   private refreshDecorations(): void {
     if (!this.roomState.isRoot()) {
       return;

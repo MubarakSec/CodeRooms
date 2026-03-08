@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { getClientMessageAckKey } from '../shared/ackKeys';
 
 vi.mock('vscode', () => {
   class EventEmitter<T> {
@@ -24,17 +25,6 @@ import type { ClientToServerMessage } from '../src/connection/MessageTypes';
 describe('pendingAck bounded map', () => {
   const MAX_PENDING_ACK = 200;
 
-  const messageKey = (message: ClientToServerMessage): string | undefined => {
-    switch (message.type) {
-      case 'chatSend':
-        return `chat:${message.messageId}`;
-      case 'docChange':
-        return `doc:${message.docId}:${message.version}`;
-      default:
-        return undefined;
-    }
-  };
-
   it('evicts oldest entry when exceeding max', () => {
     const pendingAck = new Map<string, ClientToServerMessage>();
 
@@ -47,7 +37,7 @@ describe('pendingAck bounded map', () => {
         content: `msg ${i}`,
         timestamp: i
       };
-      const key = messageKey(msg)!;
+      const key = getClientMessageAckKey(msg)!;
       pendingAck.set(key, msg);
     }
     expect(pendingAck.size).toBe(MAX_PENDING_ACK);
@@ -60,7 +50,7 @@ describe('pendingAck bounded map', () => {
       content: 'overflow',
       timestamp: 999
     };
-    const key = messageKey(overflow)!;
+    const key = getClientMessageAckKey(overflow)!;
     if (pendingAck.size >= MAX_PENDING_ACK) {
       const first = pendingAck.keys().next().value;
       if (first !== undefined) { pendingAck.delete(first); }
@@ -81,7 +71,7 @@ describe('pendingAck bounded map', () => {
       content: 'hi',
       timestamp: 1
     };
-    const key = messageKey(msg)!;
+    const key = getClientMessageAckKey(msg)!;
     if (pendingAck.size >= MAX_PENDING_ACK) {
       const first = pendingAck.keys().next().value;
       if (first !== undefined) { pendingAck.delete(first); }

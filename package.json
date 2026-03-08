@@ -60,7 +60,7 @@
         "package": "npx vsce package",
         "server:build": "tsc -p server/tsconfig.json",
         "server:start": "node ./out-server/server.js",
-        "test": "vitest run --exclude out/** --exclude out-server/**"
+        "test": "vitest run --exclude \"out/**\" --exclude \"out-server/**\""
     },
     "devDependencies": {
         "@types/adm-zip": "^0.5.7",
