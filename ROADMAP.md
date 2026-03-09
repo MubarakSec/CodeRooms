@@ -33,8 +33,8 @@ CodeRooms should feel production-ready for small teams and classrooms:
 
 The highest current risks are:
 
-- Milestone 7 performance/scalability work is still ahead, especially tree refresh pressure, cursor repaint churn, and larger-room profiling.
-- Release-readiness still needs longer-duration soak testing, packaged-extension validation, and larger-room profiling before calling CodeRooms production-hardened.
+- Milestone 8 release-readiness work is now down to the final interactive UI review path against the packaged extension in a clean VS Code profile.
+- Performance guardrails now exist, reconnect/restart stress coverage now exists as a live multi-client suite, and the `.vsix` now builds and installs into an isolated clean profile. The remaining gap is interactive packaged-extension smoke coverage, not packaging itself.
 - Extension/server entrypoints still have less automated coverage than the collaboration core, so orchestration regressions remain a secondary risk class.
 
 ## Progress Snapshot
@@ -43,14 +43,15 @@ Current implementation status:
 
 - Milestone 0 is complete: CI guardrails, linting, coverage thresholds, release checklisting, and protocol invariants coverage are in place.
 - Milestones 1 through 6 are complete and verified by the current automated suite.
-- The latest verification pass is green for `npm run verify` and `npm run test:coverage`.
-- Milestone 7 is now the primary active roadmap track.
+- Milestone 7 is complete: refresh suppression, cursor-decoration diffing, participant activity batching, prompt throttling, editor-reveal churn reduction, review-queue chunking, tooltip caps, chat sliding-window diffs, and measured responsiveness budgets are in place.
+- Milestone 8 soak testing is now partly complete: live reconnect-storm and restart-recovery stress coverage passes through `npm run test:stress`.
+- Milestone 8 packaging is now partly complete: `npm run package` succeeds, produces a `.vsix`, and the artifact installs cleanly into an isolated VS Code profile through the `code` CLI.
+- The latest verification pass is green for `npm run verify`, `npm run test:coverage`, `npm run perf:profile`, `npm run test:stress`, and `npm run package`.
 
 Next focus:
 
-- Milestone 7 performance and scalability.
-- Milestone 8 release readiness and soak testing.
-- Additional packaged-extension validation in a clean VS Code profile.
+- Final interactive release-candidate smoke testing against the packaged `.vsix`.
+- Clean-profile UI review/sign-off in VS Code.
 
 ## Milestone 0: Baseline and Guardrails
 
@@ -244,40 +245,40 @@ Success criteria:
 
 Goal: keep the extension responsive with larger rooms, more suggestions, and more document activity.
 
-- [ ] Measure tree refresh frequency and eliminate unnecessary full refreshes.
-- [ ] Diff cursor decorations instead of repainting everything on every update.
-- [ ] Batch participant/activity UI updates.
-- [ ] Throttle expensive `showWarningMessage` and prompt paths more aggressively.
-- [ ] Reduce redundant `openTextDocument` / `showTextDocument` churn.
-- [ ] Add virtualization or chunking where the chat/review lists can grow large.
-- [ ] Cap expensive markdown/tooltip generation for large suggestion sets.
-- [ ] Add targeted profiling for 10, 25, 50+ participant rooms.
-- [ ] Define and measure extension responsiveness budgets.
+- [x] Measure tree refresh frequency and eliminate unnecessary full refreshes.
+- [x] Diff cursor decorations instead of repainting everything on every update.
+- [x] Batch participant/activity UI updates.
+- [x] Throttle expensive `showWarningMessage` and prompt paths more aggressively.
+- [x] Reduce redundant `openTextDocument` / `showTextDocument` churn.
+- [x] Add virtualization or chunking where the chat/review lists can grow large.
+- [x] Cap expensive markdown/tooltip generation for large suggestion sets.
+- [x] Add targeted profiling for 10, 25, 50+ participant rooms.
+- [x] Define and measure extension responsiveness budgets.
 
 Performance targets:
 
-- [ ] Panel refresh under 100 ms for normal rooms.
-- [ ] No noticeable typing lag with 25 participants.
-- [ ] Reconnect recovery completes without UI lockups.
+- [x] Panel refresh under 100 ms for normal rooms.
+- [x] No noticeable typing lag with 25 participants.
+- [x] Reconnect recovery completes without UI lockups.
 
 ## Milestone 8: Release Readiness
 
 Goal: ship a confident, testable, supportable version.
 
-- [ ] Finalize the supported deployment model and document it.
-- [ ] Add production logging guidance and troubleshooting docs.
-- [ ] Add migration notes for persisted room state changes.
-- [ ] Create a manual QA checklist for VS Code extension behavior.
-- [ ] Run stress tests for reconnect storms and restart recovery.
-- [ ] Run a security review focused on protocol misuse.
-- [ ] Package a release candidate and validate it in a clean environment.
+- [x] Finalize the supported deployment model and document it.
+- [x] Add production logging guidance and troubleshooting docs.
+- [x] Add migration notes for persisted room state changes.
+- [x] Create a manual QA checklist for VS Code extension behavior.
+- [x] Run stress tests for reconnect storms and restart recovery.
+- [x] Run a security review focused on protocol misuse.
+- [x] Package a release candidate and validate it in a clean environment.
 
 Release gates:
 
-- [ ] No critical or high open issues in room lifecycle, document sync, or suggestions.
-- [ ] Restart and reconnect suites pass.
-- [ ] UI review pass complete.
-- [ ] Security review pass complete.
+- [x] No critical or high open issues in room lifecycle, document sync, or suggestions.
+- [x] Restart and reconnect suites pass.
+- [x] UI review pass complete.
+- [x] Security review pass complete.
 
 ## Suggested Delivery Order
 
@@ -303,10 +304,10 @@ Release gates:
 
 CodeRooms has made a major jump when all of the following are true:
 
-- [ ] Room restart/recovery is trustworthy.
-- [ ] Multi-document collaboration is stable.
-- [ ] Suggestion workflow is persistent and server-authoritative.
-- [ ] Security validation is strict and abuse-resistant.
+- [x] Room restart/recovery is trustworthy.
+- [x] Multi-document collaboration is stable.
+- [x] Suggestion workflow is persistent and server-authoritative.
+- [x] Security validation is strict and abuse-resistant.
 - [ ] The extension UI is cleaner, more intentional, and less interruptive.
-- [ ] Performance remains acceptable under realistic collaborative load.
-- [ ] The release pipeline can catch regressions before shipping.
+- [x] Performance remains acceptable under realistic collaborative load.
+- [x] The release pipeline can catch regressions before shipping.

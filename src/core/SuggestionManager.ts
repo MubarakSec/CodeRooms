@@ -2,12 +2,14 @@ import * as vscode from 'vscode';
 import { Suggestion, TextPatch } from '../connection/MessageTypes';
 import { RoomState } from './RoomState';
 import { DocumentSync } from './DocumentSync';
+import { buildSuggestionPreview } from '../util/suggestionPreview';
 
 export class SuggestionManager {
   private suggestions = new Map<string, Suggestion>();
   private readonly decorationType: vscode.TextEditorDecorationType;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly changeEmitter = new vscode.EventEmitter<void>();
+  private refreshTimer?: NodeJS.Timeout;
   private acceptHandler?: (suggestion: Suggestion) => Promise<void> | void;
   private rejectHandler?: (suggestion: Suggestion) => Promise<void> | void;
 
@@ -35,8 +37,8 @@ export class SuggestionManager {
     });
 
     this.disposables.push(
-      vscode.window.onDidChangeActiveTextEditor(() => this.refreshDecorations()),
-      vscode.workspace.onDidChangeTextDocument(() => this.refreshDecorations()),
+      vscode.window.onDidChangeActiveTextEditor(() => this.scheduleRefreshDecorations()),
+      vscode.workspace.onDidChangeTextDocument(event => this.handleDocumentChange(event)),
       this.changeEmitter
     );
   }
@@ -47,6 +49,10 @@ export class SuggestionManager {
   }
 
   dispose(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
     this.disposables.forEach(disposable => disposable.dispose());
     this.decorationType.dispose();
   }
@@ -115,7 +121,12 @@ export class SuggestionManager {
       this.emitChange();
     }
   }
+
   private refreshDecorations(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
     if (!this.roomState.isRoot()) {
       return;
     }
@@ -138,23 +149,48 @@ export class SuggestionManager {
 
     const decorations = Array.from(this.suggestions.values())
       .filter(suggestion => suggestion.docId === activeDocId)
-      .flatMap(suggestion =>
-        suggestion.patches.map(patch => {
-          const preview = (patch.text || 'Remove text').slice(0, 80);
-          const truncated = preview.length < (patch.text || '').length ? preview + '…' : preview;
-          const hover = new vscode.MarkdownString();
-          hover.isTrusted = true;
-          hover.appendMarkdown(`**💡 Suggestion from ${suggestion.authorName}**\n\n`);
-          hover.appendCodeblock(truncated, 'text');
-          hover.appendMarkdown(`\n\n_Use the Suggestions panel to accept or reject_`);
-          return {
-            range: this.rangeFromPatch(patch),
-            hoverMessage: hover
-          };
-        })
-      );
+      .flatMap(suggestion => {
+        const hover = new vscode.MarkdownString();
+        const preview = buildSuggestionPreview(suggestion.patches, 80);
+        hover.isTrusted = true;
+        hover.appendMarkdown(`**💡 Suggestion from ${suggestion.authorName}**\n\n`);
+        if (preview.text) {
+          hover.appendCodeblock(preview.text, 'text');
+        }
+        if (preview.omittedPatchCount > 0) {
+          hover.appendMarkdown(`\n\n_${preview.omittedPatchCount} more patch${preview.omittedPatchCount !== 1 ? 'es' : ''} in this suggestion_`);
+        }
+        hover.appendMarkdown(`\n\n_Use the Suggestions panel to accept or reject_`);
+        return suggestion.patches.map(patch => ({
+          range: this.rangeFromPatch(patch),
+          hoverMessage: hover
+        }));
+      });
 
     editor.setDecorations(this.decorationType, decorations);
+  }
+
+  private scheduleRefreshDecorations(): void {
+    if (this.refreshTimer) {
+      return;
+    }
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = undefined;
+      this.refreshDecorations();
+    }, 30);
+  }
+
+  private handleDocumentChange(event: vscode.TextDocumentChangeEvent): void {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.uri.toString() !== event.document.uri.toString()) {
+      return;
+    }
+    const activeDocId = this.documentSync?.getActiveDocumentId();
+    const sharedUri = activeDocId ? this.documentSync?.getDocumentUri(activeDocId) : undefined;
+    if (sharedUri && sharedUri.toString() !== event.document.uri.toString()) {
+      return;
+    }
+    this.scheduleRefreshDecorations();
   }
 
   private rangeFromPatch(patch: TextPatch): vscode.Range {

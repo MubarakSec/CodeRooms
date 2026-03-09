@@ -9,9 +9,16 @@ interface RemoteCursor {
   color: string;
 }
 
+interface AppliedDecorationState {
+  cursor: string;
+  selection: string;
+}
+
 export class CursorManager {
   private cursors = new Map<string, RemoteCursor>();
   private decorationTypes = new Map<string, { cursor: vscode.TextEditorDecorationType, selection: vscode.TextEditorDecorationType }>();
+  private appliedDecorations = new Map<vscode.TextEditor, Map<string, AppliedDecorationState>>();
+  private refreshTimer?: NodeJS.Timeout;
 
   // A fixed palette of colors for participants
   private colors = [
@@ -50,38 +57,65 @@ export class CursorManager {
   }
 
   public updateCursor(userId: string, userName: string, uri: string, position: Position, selections?: { start: Position; end: Position }[]) {
-    this.cursors.set(userId, {
+    const nextCursor: RemoteCursor = {
       userName,
       uri,
       position,
       selections,
       color: this.getColorForUser(userId)
-    });
-    this.refreshDecorations();
+    };
+    const previous = this.cursors.get(userId);
+    if (previous && this.remoteCursorSignature(previous) === this.remoteCursorSignature(nextCursor)) {
+      return;
+    }
+    this.cursors.set(userId, nextCursor);
+    this.scheduleRefreshDecorations();
   }
 
   public removeCursor(userId: string) {
     this.cursors.delete(userId);
+    this.clearAppliedDecorationsForUser(userId);
     const dt = this.decorationTypes.get(userId);
     if (dt) {
       dt.cursor.dispose();
       dt.selection.dispose();
       this.decorationTypes.delete(userId);
     }
-    this.refreshDecorations();
   }
 
   public clearAll() {
     this.cursors.clear();
+    this.clearAppliedDecorations();
     for (const dt of this.decorationTypes.values()) {
       dt.cursor.dispose();
       dt.selection.dispose();
     }
     this.decorationTypes.clear();
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
   }
 
   public refreshDecorations() {
-    // Collect cursors by URI
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
+    this.applyDecorations();
+  }
+
+  private scheduleRefreshDecorations() {
+    if (this.refreshTimer) {
+      return;
+    }
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = undefined;
+      this.applyDecorations();
+    }, 16);
+  }
+
+  private applyDecorations() {
     const cursorsByUri = new Map<string, { userId: string, cursor: RemoteCursor }[]>();
     for (const [userId, cursor] of this.cursors.entries()) {
       if (!cursorsByUri.has(cursor.uri)) {
@@ -90,24 +124,31 @@ export class CursorManager {
       cursorsByUri.get(cursor.uri)!.push({ userId, cursor });
     }
 
-    // Apply to visible text editors
+    const visibleEditors = vscode.window.visibleTextEditors;
+    const visibleEditorSet = new Set(visibleEditors);
+    for (const editor of Array.from(this.appliedDecorations.keys())) {
+      if (!visibleEditorSet.has(editor)) {
+        this.appliedDecorations.delete(editor);
+      }
+    }
+
     for (const editor of vscode.window.visibleTextEditors) {
       const uriStr = editor.document.uri.toString();
       const editorCursors = cursorsByUri.get(uriStr) || [];
+      const desiredUserIds = new Set(editorCursors.map(entry => entry.userId));
+      const editorState = this.appliedDecorations.get(editor) ?? new Map<string, AppliedDecorationState>();
 
-      // We still need to clear decorations for users who are NO LONGER in this file
-      for (const [userId, dt] of this.decorationTypes.entries()) {
-        const uCursor = this.cursors.get(userId);
-        if (uCursor && uCursor.uri === uriStr) {
-          // This user is in this file, we will set them
-        } else {
-          // Clear it out
-          editor.setDecorations(dt.cursor, []);
-          editor.setDecorations(dt.selection, []);
+      for (const userId of Array.from(editorState.keys())) {
+        if (!desiredUserIds.has(userId)) {
+          const dt = this.decorationTypes.get(userId);
+          if (dt) {
+            editor.setDecorations(dt.cursor, []);
+            editor.setDecorations(dt.selection, []);
+          }
+          editorState.delete(userId);
         }
       }
 
-      // Set new decorations
       for (const { userId, cursor } of editorCursors) {
         const dt = this.getDecorationType(userId);
         const lastLine = editor.document.lineCount - 1;
@@ -116,21 +157,83 @@ export class CursorManager {
         const clampedChar = Math.max(0, Math.min(cursor.position.character, maxChar));
         const cursorPosition = new vscode.Position(clampedLine, clampedChar);
         const cursorRange = new vscode.Range(cursorPosition, cursorPosition);
-        editor.setDecorations(dt.cursor, [cursorRange]);
+        const cursorRanges = [cursorRange];
 
+        let selectionRanges: vscode.Range[] = [];
         if (cursor.selections && cursor.selections.length > 0) {
-          const selRanges = cursor.selections.map(sel => {
+          selectionRanges = cursor.selections.map(sel => {
             const sLine = Math.max(0, Math.min(sel.start.line, lastLine));
             const sChar = Math.max(0, Math.min(sel.start.character, editor.document.lineAt(sLine).text.length));
             const eLine = Math.max(0, Math.min(sel.end.line, lastLine));
             const eChar = Math.max(0, Math.min(sel.end.character, editor.document.lineAt(eLine).text.length));
             return new vscode.Range(new vscode.Position(sLine, sChar), new vscode.Position(eLine, eChar));
           });
-          editor.setDecorations(dt.selection, selRanges);
-        } else {
-          editor.setDecorations(dt.selection, []);
         }
+
+        const nextState: AppliedDecorationState = {
+          cursor: this.rangeSignature(cursorRanges),
+          selection: this.rangeSignature(selectionRanges)
+        };
+        const previousState = editorState.get(userId);
+        if (!previousState || previousState.cursor !== nextState.cursor) {
+          editor.setDecorations(dt.cursor, cursorRanges);
+        }
+        if (!previousState || previousState.selection !== nextState.selection) {
+          editor.setDecorations(dt.selection, selectionRanges);
+        }
+        editorState.set(userId, nextState);
+      }
+
+      if (editorState.size > 0) {
+        this.appliedDecorations.set(editor, editorState);
+      } else {
+        this.appliedDecorations.delete(editor);
       }
     }
+  }
+
+  private clearAppliedDecorationsForUser(userId: string) {
+    const dt = this.decorationTypes.get(userId);
+    for (const [editor, editorState] of this.appliedDecorations.entries()) {
+      if (!editorState.has(userId)) {
+        continue;
+      }
+      if (dt) {
+        editor.setDecorations(dt.cursor, []);
+        editor.setDecorations(dt.selection, []);
+      }
+      editorState.delete(userId);
+      if (editorState.size === 0) {
+        this.appliedDecorations.delete(editor);
+      }
+    }
+  }
+
+  private clearAppliedDecorations() {
+    for (const [editor, editorState] of this.appliedDecorations.entries()) {
+      for (const userId of editorState.keys()) {
+        const dt = this.decorationTypes.get(userId);
+        if (!dt) {
+          continue;
+        }
+        editor.setDecorations(dt.cursor, []);
+        editor.setDecorations(dt.selection, []);
+      }
+    }
+    this.appliedDecorations.clear();
+  }
+
+  private remoteCursorSignature(cursor: RemoteCursor): string {
+    return JSON.stringify({
+      uri: cursor.uri,
+      position: cursor.position,
+      selections: cursor.selections ?? []
+    });
+  }
+
+  private rangeSignature(ranges: vscode.Range[]): string {
+    return ranges.map(range =>
+      `${range.start.line}:${range.start.character}-${range.end.line}:${range.end.character}`
+    ).join('|');
   }
 }

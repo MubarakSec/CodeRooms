@@ -17,6 +17,7 @@ import { ClientToServerMessage, Participant, Role, RoomMode, ServerToClientMessa
 import { DEFAULT_SERVER_URL } from './util/config';
 import { logger } from './util/logger';
 import { encrypt, decrypt, type EncryptedPayload } from './util/crypto';
+import { NoticeCooldown } from './util/noticeCooldown';
 import { consumePendingRoomSecret } from './util/roomSecrets';
 import {
   buildSuggestionReviewSummary,
@@ -49,6 +50,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const followController = new FollowController();
   const statusBar = new StatusBarManager(roomState, followController);
   const webSocket = new WebSocketClient();
+  const noticeCooldown = new NoticeCooldown();
   let isConnected = false;
   let connectionPromise: Promise<void> | undefined;
   const outboundQueue = new OutboundMessageQueue(message => webSocket.send(message));
@@ -59,6 +61,24 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const flushPending = (): void => outboundQueue.flush(isConnected);
   const sendClientMessage = (message: ClientToServerMessage): void => outboundQueue.send(message, isConnected);
+  const showInfoNotice = (key: string, message: string, cooldownMs = 0, ...actions: string[]) => {
+    if (cooldownMs > 0 && !noticeCooldown.shouldShow(`info:${key}`, cooldownMs)) {
+      return Promise.resolve(undefined);
+    }
+    return vscode.window.showInformationMessage(message, ...actions);
+  };
+  const showWarningNotice = (key: string, message: string, cooldownMs = 0, ...actions: string[]) => {
+    if (cooldownMs > 0 && !noticeCooldown.shouldShow(`warning:${key}`, cooldownMs)) {
+      return Promise.resolve(undefined);
+    }
+    return vscode.window.showWarningMessage(message, ...actions);
+  };
+  const showErrorNotice = (key: string, message: string, cooldownMs = 0, ...actions: string[]) => {
+    if (cooldownMs > 0 && !noticeCooldown.shouldShow(`error:${key}`, cooldownMs)) {
+      return Promise.resolve(undefined);
+    }
+    return vscode.window.showErrorMessage(message, ...actions);
+  };
 
   const applyDebugConfig = () => {
     const enabled = vscode.workspace.getConfiguration('coderooms').get<boolean>('debugLogging') ?? false;
@@ -109,6 +129,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let lastJoinSecret: string | undefined; // preserved for auto-rejoin on reconnect
   let lastJoinSessionToken: string | undefined;
   let refreshTimer: NodeJS.Timeout | undefined;
+  let participantActivityExpiryTimer: NodeJS.Timeout | undefined;
 
   const followDisposable = followController.onDidChange(async () => {
     statusBar.update();
@@ -233,6 +254,30 @@ export function activate(context: vscode.ExtensionContext): void {
     }, debounceMs);
   };
 
+  const clearParticipantActivityExpiryTimer = () => {
+    if (!participantActivityExpiryTimer) {
+      return;
+    }
+    clearTimeout(participantActivityExpiryTimer);
+    participantActivityExpiryTimer = undefined;
+  };
+
+  const scheduleParticipantActivityExpiryRefresh = () => {
+    clearParticipantActivityExpiryTimer();
+    const nextExpiry = roomState.getNextParticipantActivityExpiry();
+    if (!nextExpiry) {
+      return;
+    }
+    participantActivityExpiryTimer = setTimeout(() => {
+      participantActivityExpiryTimer = undefined;
+      const changed = roomState.pruneExpiredParticipantActivity();
+      if (changed) {
+        scheduleRefresh();
+      }
+      scheduleParticipantActivityExpiryRefresh();
+    }, Math.max(25, nextExpiry - Date.now() + 25));
+  };
+
   suggestionManager.onDidChange(() => scheduleRefresh());
   documentSync.onDidChangeSharedDocument(() => scheduleRefresh());
 
@@ -265,7 +310,7 @@ export function activate(context: vscode.ExtensionContext): void {
   webSocket.on('reconnectFailed', () => {
     statusBar.setConnectionState('error', 'Could not reconnect after multiple attempts');
     resetState();
-    void vscode.window.showErrorMessage(getReconnectFailureNotice(), 'Retry').then(action => {
+    void showErrorNotice('reconnect-failed', getReconnectFailureNotice(), 5000, 'Retry').then(action => {
       if (action === 'Retry') {
         void ensureConnection(ConnectionIntent.ForceReconnect);
       }
@@ -295,6 +340,8 @@ export function activate(context: vscode.ExtensionContext): void {
     outboundQueue.clear();
     pendingRoleUpdates.forEach(timer => clearTimeout(timer));
     pendingRoleUpdates.clear();
+    clearParticipantActivityExpiryTimer();
+    noticeCooldown.clear();
     lastRootCursorMessage = undefined;
     e2eKey = undefined;
     pendingSecret = undefined;
@@ -470,7 +517,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (roomState.isRoot()) {
           const target = roomState.getParticipants().find(p => p.userId === message.userId);
           if (target) {
-            void vscode.window.showInformationMessage(`${target.displayName} is now ${message.role}.`);
+            void showInfoNotice(`role-updated:${message.userId}:${message.role}`, `${target.displayName} is now ${message.role}.`, 1500);
           }
         }
         const pendingTimer = pendingRoleUpdates.get(message.userId);
@@ -526,7 +573,7 @@ export function activate(context: vscode.ExtensionContext): void {
       case 'participantActivity': {
         roomState.setParticipantActivity(message.userId, message.at);
         scheduleRefresh();
-        setTimeout(() => scheduleRefresh(), 2200);
+        scheduleParticipantActivityExpiryRefresh();
         break;
       }
       case 'newSuggestion': {
@@ -538,10 +585,11 @@ export function activate(context: vscode.ExtensionContext): void {
           userId: message.suggestion.authorId
         });
         if (isNewSuggestion && roomState.isRoot()) {
-          void vscode.window.showInformationMessage(
-            `${message.suggestion.authorName} sent a suggestion.`,
-            'Open review queue'
-          ).then(action => {
+          const pendingSuggestions = suggestionManager.getPendingSuggestionIds().length;
+          const noticeMessage = pendingSuggestions > 1
+            ? `${pendingSuggestions} suggestions are waiting for review.`
+            : `${message.suggestion.authorName} sent a suggestion.`;
+          void showInfoNotice('new-suggestion', noticeMessage, 2000, 'Open review queue').then(action => {
             if (action === 'Open review queue') {
               openParticipantsView();
             }
@@ -568,14 +616,16 @@ export function activate(context: vscode.ExtensionContext): void {
         break;
       }
       case 'suggestionsReviewed': {
-        void vscode.window.showInformationMessage(
+        void showInfoNotice(
+          'suggestions-reviewed',
           buildSuggestionReviewSummary({
             action: message.action,
             reviewedCount: message.reviewedCount,
             alreadyReviewedCount: message.alreadyReviewedCount,
             conflictCount: message.conflictCount,
             missingCount: message.missingCount
-          })
+          }),
+          750
         );
         break;
       }
@@ -613,10 +663,10 @@ export function activate(context: vscode.ExtensionContext): void {
         const payload = message.message || 'Unknown error';
         switch (message.code) {
           case 'FORBIDDEN':
-            void vscode.window.showErrorMessage('Action denied: only the room owner can perform this.');
+            void vscode.window.showErrorMessage(payload);
             break;
           case 'TARGET_NOT_FOUND':
-            void vscode.window.showErrorMessage('The participant was not found. They may have left the room.');
+            void vscode.window.showErrorMessage(payload);
             break;
           case 'ROOM_SECRET_REQUIRED':
             await retryJoinWithSecret('This room requires a secret. Please enter the secret and try again.');
@@ -641,46 +691,46 @@ export function activate(context: vscode.ExtensionContext): void {
             void vscode.window.showErrorMessage('Room not found. Double-check the invite code.');
             break;
           case 'PATCH_INVALID':
-            void vscode.window.showWarningMessage(getDocumentResyncNotice());
+            void showWarningNotice('patch-invalid', getDocumentResyncNotice(), 3000);
             break;
           case 'MESSAGE_TOO_LONG':
-            void vscode.window.showWarningMessage('Message is too long (max 2000 characters).');
+            void showWarningNotice('message-too-long', 'Message is too long (max 2000 characters).', 3000);
             break;
           case 'MESSAGE_EMPTY':
-            void vscode.window.showWarningMessage('Message cannot be empty.');
+            void showWarningNotice('message-empty', 'Message cannot be empty.', 3000);
             break;
           case 'PAYLOAD_TOO_LARGE':
-            void vscode.window.showWarningMessage('The file is too large to share (max 2 MB).');
+            void showWarningNotice('payload-too-large', 'The file is too large to share (max 2 MB).', 3000);
             break;
           case 'DOCUMENT_TOO_LARGE':
-            void vscode.window.showWarningMessage('The document is too large to share (max 2 MB).');
+            void showWarningNotice('document-too-large', 'The document is too large to share (max 2 MB).', 3000);
             break;
           case 'MEMORY_LIMIT':
-            void vscode.window.showWarningMessage('The server document memory limit has been reached. Reduce shared document size and retry.');
+            void showWarningNotice('memory-limit', 'The server document memory limit has been reached. Reduce shared document size and retry.', 3000);
             break;
           case 'TOKEN_INVALID':
             void vscode.window.showErrorMessage('Invite token is invalid or has expired. Ask the room owner for a new one.');
             break;
           case 'LABEL_TOO_LONG':
-            void vscode.window.showWarningMessage('Invite labels must be 80 characters or fewer.');
+            void showWarningNotice('label-too-long', 'Invite labels must be 80 characters or fewer.', 3000);
             break;
           case 'OWNER_UNAVAILABLE':
-            void vscode.window.showWarningMessage(getOwnerUnavailableNotice());
+            void showWarningNotice('owner-unavailable', getOwnerUnavailableNotice(), 3000);
             break;
           case 'ROOM_STATE_INVALID':
-            void vscode.window.showWarningMessage(getRoomStateInvalidNotice());
+            void showWarningNotice('room-state-invalid', getRoomStateInvalidNotice(), 3000);
             break;
           case 'SUGGESTION_ALREADY_REVIEWED':
-            void vscode.window.showWarningMessage('That suggestion has already been reviewed.');
+            void showWarningNotice('suggestion-reviewed', 'That suggestion has already been reviewed.', 3000);
             break;
           case 'CONFLICT':
-            void vscode.window.showWarningMessage('This request conflicts with the current shared state. Refresh the session and retry.');
+            void showWarningNotice('state-conflict', 'This request conflicts with the current shared state. Refresh the session and retry.', 3000);
             break;
           default:
             if (payload.toLowerCase().includes('room not found')) {
               void vscode.window.showErrorMessage('Room not found. Double-check the invite code.');
             } else if (payload.toLowerCase().includes('room closed')) {
-              void vscode.window.showWarningMessage(getRoomClosedNotice());
+              void showWarningNotice('room-closed', getRoomClosedNotice(), 3000);
               resetState();
             } else {
               void vscode.window.showErrorMessage(`CodeRooms: ${payload}`);

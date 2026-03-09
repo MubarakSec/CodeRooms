@@ -31,7 +31,8 @@ export default defineConfig({
       '.coverage-v8/**',
       'coverage/**',
       'out/**',
-      'out-server/**'
+      'out-server/**',
+      'tests/serverStress.test.ts'
     ],
     coverage: {
       provider: 'v8',

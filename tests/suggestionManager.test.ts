@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+var activeTextEditor: any;
+var onDidChangeTextDocumentListener: ((event: any) => void) | undefined;
 
 vi.mock('vscode', () => {
   class Range {
@@ -53,10 +56,15 @@ vi.mock('vscode', () => {
     window: {
       createTextEditorDecorationType: () => ({ dispose: () => {} }),
       onDidChangeActiveTextEditor: () => ({ dispose: () => {} }),
-      activeTextEditor: undefined
+      get activeTextEditor() {
+        return activeTextEditor;
+      }
     },
     workspace: {
-      onDidChangeTextDocument: () => ({ dispose: () => {} })
+      onDidChangeTextDocument: (listener: (event: any) => void) => {
+        onDidChangeTextDocumentListener = listener;
+        return { dispose: () => {} };
+      }
     }
   };
 });
@@ -75,6 +83,17 @@ const suggestion = {
 };
 
 describe('SuggestionManager', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    activeTextEditor = undefined;
+    onDidChangeTextDocumentListener = undefined;
+  });
+
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
   it('keeps a new suggestion pending without forcing an accept or reject prompt', async () => {
     const manager = new SuggestionManager({ isRoot: () => true } as any);
     const isNewSuggestion = manager.handleSuggestion(suggestion);
@@ -118,5 +137,53 @@ describe('SuggestionManager', () => {
     expect(first).toBe(true);
     expect(second).toBe(false);
     expect(manager.getSuggestions()).toHaveLength(1);
+  });
+
+  it('ignores unrelated text document changes before rebuilding decorations', () => {
+    const setDecorations = vi.fn();
+    activeTextEditor = {
+      document: {
+        uri: { toString: () => 'file:///shared.ts' }
+      },
+      setDecorations
+    };
+
+    const manager = new SuggestionManager(
+      { isRoot: () => true } as any,
+      {
+        getActiveDocumentId: () => 'doc-1',
+        getDocumentUri: () => ({ toString: () => 'file:///shared.ts' })
+      } as any
+    );
+
+    manager.replaceAll([{
+      ...suggestion,
+      patches: [{
+        range: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 1 }
+        },
+        text: 'x'
+      }]
+    }]);
+    setDecorations.mockClear();
+
+    onDidChangeTextDocumentListener?.({
+      document: {
+        uri: { toString: () => 'file:///other.ts' }
+      }
+    });
+    vi.runAllTimers();
+
+    expect(setDecorations).not.toHaveBeenCalled();
+
+    onDidChangeTextDocumentListener?.({
+      document: {
+        uri: { toString: () => 'file:///shared.ts' }
+      }
+    });
+    vi.runAllTimers();
+
+    expect(setDecorations).toHaveBeenCalledTimes(1);
   });
 });

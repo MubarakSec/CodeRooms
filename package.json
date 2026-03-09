@@ -64,6 +64,8 @@
         "server:start": "node ./out-server/server.js",
         "test": "vitest run",
         "test:coverage": "node -e \"require('fs').mkdirSync('coverage/.tmp', { recursive: true })\" && vitest run --coverage --maxWorkers=1",
+        "test:stress": "vitest run -c vitest.stress.config.ts",
+        "perf:profile": "vitest run tests/performanceProfile.test.ts",
         "verify": "npm run lint && npm run typecheck && npm run server:build && npm test",
         "verify:ci": "npm run lint && npm run typecheck && npm run server:build && npm run test:coverage"
     },

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/util/logger', () => ({
   logger: {
@@ -9,10 +9,23 @@ vi.mock('../src/util/logger', () => ({
   }
 }));
 
-let openDocumentResult: any;
-let applyEditResult = true;
+var openDocumentResult: any;
+var applyEditResult = true;
+var openTextDocumentSpy: ReturnType<typeof vi.fn>;
+var showTextDocumentSpy: ReturnType<typeof vi.fn>;
+var visibleTextEditors: any[];
+var activeTextEditor: any;
 
 vi.mock('vscode', () => {
+  openTextDocumentSpy = vi.fn(() => Promise.resolve(openDocumentResult));
+  showTextDocumentSpy = vi.fn((document: any) => Promise.resolve({
+    document,
+    selection: undefined,
+    revealRange: vi.fn()
+  }));
+  visibleTextEditors = [];
+  activeTextEditor = undefined;
+
   class Uri {
     constructor(
       readonly scheme: string,
@@ -37,11 +50,18 @@ vi.mock('vscode', () => {
   class Range {
     start: Position;
     end: Position;
-    constructor(sl: number, sc: number, el: number, ec: number) {
-      this.start = new Position(sl, sc);
-      this.end = new Position(el, ec);
+    constructor(startOrLine: number | Position, startCharacterOrEnd?: number | Position, endLine?: number, endCharacter?: number) {
+      if (startOrLine instanceof Position && startCharacterOrEnd instanceof Position) {
+        this.start = startOrLine;
+        this.end = startCharacterOrEnd;
+        return;
+      }
+      this.start = new Position(startOrLine as number, startCharacterOrEnd as number);
+      this.end = new Position(endLine ?? startOrLine as number, endCharacter ?? startCharacterOrEnd as number);
     }
   }
+
+  class Selection extends Range {}
 
   class WorkspaceEdit {
     replace() {}
@@ -49,16 +69,22 @@ vi.mock('vscode', () => {
 
   const workspace = {
     applyEdit: () => Promise.resolve(applyEditResult),
-    openTextDocument: () => Promise.resolve(openDocumentResult),
+    openTextDocument: (...args: any[]) => openTextDocumentSpy(...args),
     onDidChangeTextDocument: () => ({ dispose: () => {} }),
     onDidCloseTextDocument: () => ({ dispose: () => {} })
   };
 
   const window = {
+    get activeTextEditor() {
+      return activeTextEditor;
+    },
+    get visibleTextEditors() {
+      return visibleTextEditors;
+    },
     showWarningMessage: () => Promise.resolve(undefined),
     showErrorMessage: () => Promise.resolve(undefined),
     showInformationMessage: () => Promise.resolve(undefined),
-    showTextDocument: (document: any) => Promise.resolve({ document })
+    showTextDocument: (...args: any[]) => showTextDocumentSpy(...args)
   };
 
   const languages = {
@@ -85,7 +111,21 @@ vi.mock('vscode', () => {
     dispose() {}
   };
 
-  return { Uri, Position, Range, WorkspaceEdit, workspace, window, languages, EventEmitter, Disposable };
+  return {
+    Uri,
+    Position,
+    Range,
+    Selection,
+    WorkspaceEdit,
+    workspace,
+    window,
+    languages,
+    EventEmitter,
+    Disposable,
+    TextEditorRevealType: {
+      InCenter: 0
+    }
+  };
 });
 
 import * as vscode from 'vscode';
@@ -103,6 +143,13 @@ function createFakeDocument(filePath: string, text: string) {
 }
 
 describe('DocumentSync reconciliation', () => {
+  beforeEach(() => {
+    openTextDocumentSpy.mockClear();
+    showTextDocumentSpy.mockClear();
+    visibleTextEditors.length = 0;
+    activeTextEditor = undefined;
+  });
+
   it('keeps a newly shared root document pending until the server confirms it', async () => {
     const sent: any[] = [];
     const localDocument = createFakeDocument('/tmp/root.ts', 'const x = 1;');
@@ -224,5 +271,75 @@ describe('DocumentSync reconciliation', () => {
 
     expect((sync as any).pendingFullSyncs.has('doc-1')).toBe(false);
     expect((sync as any).documents.get('doc-1').version).toBe(4);
+  });
+
+  it('reuses a single open/show cycle when revealing a followed cursor', async () => {
+    const sync = new DocumentSync(
+      {
+        getRoomId: () => 'room-1',
+        setActiveSharedDocLabel: vi.fn(),
+        isCollaborator: () => false,
+        isCollaboratorInDirectMode: () => false,
+        isViewer: () => false,
+        getUserId: () => 'root-1'
+      } as any,
+      { updateVersion: async () => {}, prepare: async () => {} } as any,
+      () => {}
+    );
+
+    const document = createFakeDocument('/tmp/follow.ts', 'hello');
+    openDocumentResult = document;
+    (sync as any).documents.set('doc-1', {
+      docId: 'doc-1',
+      uri: document.uri,
+      version: 1,
+      lastSyncedText: 'hello',
+      pendingSnapshot: false
+    });
+    (sync as any).remoteToLocal.set('doc-1', document.uri);
+
+    await sync.revealRemoteCursor('doc-1', { line: 0, character: 1 });
+
+    expect(openTextDocumentSpy).toHaveBeenCalledTimes(1);
+    expect(showTextDocumentSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses the active editor when the shared document is already focused', async () => {
+    const sync = new DocumentSync(
+      {
+        getRoomId: () => 'room-1',
+        setActiveSharedDocLabel: vi.fn(),
+        isCollaborator: () => false,
+        isCollaboratorInDirectMode: () => false,
+        isViewer: () => false,
+        getUserId: () => 'root-1'
+      } as any,
+      { updateVersion: async () => {}, prepare: async () => {} } as any,
+      () => {}
+    );
+
+    const document = createFakeDocument('/tmp/follow-focused.ts', 'hello');
+    const editor = {
+      document,
+      selection: undefined,
+      revealRange: vi.fn()
+    };
+    activeTextEditor = editor;
+    visibleTextEditors.push(editor);
+    (sync as any).documents.set('doc-1', {
+      docId: 'doc-1',
+      uri: document.uri,
+      sharedDocument: document,
+      version: 1,
+      lastSyncedText: 'hello',
+      pendingSnapshot: false
+    });
+    (sync as any).remoteToLocal.set('doc-1', document.uri);
+
+    await sync.revealRemoteCursor('doc-1', { line: 0, character: 2 });
+
+    expect(openTextDocumentSpy).not.toHaveBeenCalled();
+    expect(showTextDocumentSpy).not.toHaveBeenCalled();
+    expect(editor.revealRange).toHaveBeenCalledTimes(1);
   });
 });

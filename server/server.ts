@@ -568,6 +568,10 @@ export async function stopCodeRoomsServer(): Promise<void> {
   clearBackgroundTasks();
   uninstallShutdownHandlers();
 
+  if (persistRoomsEnabled && rooms.size > 0) {
+    await saveRooms();
+  }
+
   for (const client of activeWss.clients) {
     client.terminate();
   }

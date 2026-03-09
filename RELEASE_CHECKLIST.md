@@ -6,6 +6,8 @@ Use this checklist before tagging or shipping a CodeRooms release candidate.
 
 - [ ] `npm run verify` passes locally.
 - [ ] `npm run test:coverage` passes locally.
+- [ ] `npm run perf:profile` passes locally.
+- [ ] `npm run test:stress` passes locally.
 - [ ] CI is green for the current branch/PR.
 - [ ] No unexpected diffs remain in generated outputs or backups.
 

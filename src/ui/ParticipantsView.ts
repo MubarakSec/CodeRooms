@@ -15,6 +15,9 @@ import {
   formatRoleLabel,
   formatRoomModeLabel
 } from './viewState';
+import { buildParticipantsViewRefreshKey } from './participantsViewRefresh';
+import { buildSuggestionChunks, buildSuggestionGroups, SuggestionChunkPlan, SuggestionGroupPlan, SUGGESTION_CHUNK_SIZE } from './suggestionBuckets';
+import { buildSuggestionPreview } from '../util/suggestionPreview';
 
 enum Block {
   Session = 'session',
@@ -122,22 +125,45 @@ class SuggestionItem extends vscode.TreeItem {
     super(label, vscode.TreeItemCollapsibleState.None);
     this.suggestion = suggestion;
 
-    const preview = (suggestion.patches[0]?.text || '').slice(0, 60);
-    const truncated = preview.length < (suggestion.patches[0]?.text || '').length ? preview + '…' : preview;
+    const preview = buildSuggestionPreview(suggestion.patches, 60);
     const createdTime = new Date(suggestion.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     this.description = `by ${suggestion.authorName} · ${suggestion.patches.length} patch${suggestion.patches.length !== 1 ? 'es' : ''} · ${createdTime}`;
 
     const md = new vscode.MarkdownString();
     md.isTrusted = true;
     md.appendMarkdown(`**Review from ${escapeMarkdown(suggestion.authorName)}**\n\n`);
-    if (truncated) {
-      md.appendCodeblock(truncated, 'text');
+    if (preview.text) {
+      md.appendCodeblock(preview.text, 'text');
+    }
+    if (preview.omittedPatchCount > 0) {
+      md.appendMarkdown(`\n\n_${preview.omittedPatchCount} more patch${preview.omittedPatchCount !== 1 ? 'es' : ''} in this suggestion_`);
     }
     md.appendMarkdown(`\n\n${suggestion.patches.length} patch${suggestion.patches.length !== 1 ? 'es' : ''} · ${createdTime}\n\n_Click to open the shared file_`);
     this.tooltip = md;
     this.iconPath = new vscode.ThemeIcon('lightbulb');
     this.command = { command: 'coderooms.setActiveDocument', title: 'Open suggestion target', arguments: [suggestion.docId] };
     this.contextValue = 'coderooms.suggestion.root';
+  }
+}
+
+class SuggestionGroupItem extends vscode.TreeItem {
+  constructor(
+    readonly group: SuggestionGroupPlan,
+    label: string
+  ) {
+    super(label, vscode.TreeItemCollapsibleState.Collapsed);
+    this.description = `${group.suggestions.length} pending`;
+    this.iconPath = new vscode.ThemeIcon('file-code');
+    this.contextValue = 'coderooms.suggestion.group';
+  }
+}
+
+class SuggestionChunkItem extends vscode.TreeItem {
+  constructor(readonly chunk: SuggestionChunkPlan) {
+    super(chunk.label, vscode.TreeItemCollapsibleState.Collapsed);
+    this.description = `${chunk.suggestions.length} pending`;
+    this.iconPath = new vscode.ThemeIcon('list-ordered');
+    this.contextValue = 'coderooms.suggestion.chunk';
   }
 }
 
@@ -169,6 +195,8 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
   private readonly emitter = new vscode.EventEmitter<vscode.TreeItem | undefined>();
   readonly onDidChangeTreeData = this.emitter.event;
   private readonly treeViews = new Map<string, vscode.TreeView<vscode.TreeItem>>();
+  private lastRefreshKey?: string;
+  private refreshStats = { requested: 0, emitted: 0, skipped: 0 };
 
   constructor(
     private readonly roomState: RoomState,
@@ -177,8 +205,20 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
     private readonly followController: FollowController
   ) {}
 
-  refresh(): void {
+  refresh(force = false): void {
+    this.refreshStats.requested += 1;
+    const nextKey = this.computeRefreshKey();
+    if (!force && this.lastRefreshKey === nextKey) {
+      this.refreshStats.skipped += 1;
+      return;
+    }
+    this.lastRefreshKey = nextKey;
+    this.refreshStats.emitted += 1;
     this.emitter.fire(undefined);
+  }
+
+  getRefreshStats(): { requested: number; emitted: number; skipped: number } {
+    return { ...this.refreshStats };
   }
 
   registerTreeView(viewId: string, treeView: vscode.TreeView<vscode.TreeItem>): void {
@@ -218,6 +258,18 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
       }
     }
 
+    if (element instanceof SuggestionGroupItem) {
+      const chunks = buildSuggestionChunks(element.group.suggestions);
+      if (chunks.length <= 1) {
+        return element.group.suggestions.map(suggestion => new SuggestionItem(suggestion, this.documentSync.getDocumentUri(suggestion.docId)));
+      }
+      return chunks.map(chunk => new SuggestionChunkItem(chunk));
+    }
+
+    if (element instanceof SuggestionChunkItem) {
+      return element.chunk.suggestions.map(suggestion => new SuggestionItem(suggestion, this.documentSync.getDocumentUri(suggestion.docId)));
+    }
+
     return [];
   }
 
@@ -231,6 +283,32 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
       roots.push(this.createSuggestionsHeader());
     }
     return roots;
+  }
+
+  private computeRefreshKey(): string {
+    const participants = this.roomState.getParticipants();
+    return buildParticipantsViewRefreshKey({
+      roomId: this.roomState.getRoomId(),
+      role: this.roomState.getRole(),
+      mode: this.roomState.getRoomMode(),
+      collaboratorDirectMode: this.roomState.isCollaboratorInDirectMode(),
+      activeSharedDocLabel: this.roomState.getActiveSharedDocLabel(),
+      isFollowing: this.followController.isFollowing(),
+      activePendingSuggestionCount: this.documentSync.getPendingSuggestionCount(),
+      participants: participants.map(participant => ({
+        userId: participant.userId,
+        displayName: participant.displayName,
+        role: participant.role,
+        isDirectEditMode: participant.isDirectEditMode,
+        isTyping: this.roomState.isParticipantTyping(participant.userId),
+        currentFile: this.roomState.getParticipantFile(participant.userId)
+      })),
+      documents: this.documentSync.getSharedDocuments().map(document => ({
+        ...document,
+        uri: document.uri?.toString()
+      })),
+      suggestions: this.suggestionManager.getSuggestions()
+    });
   }
 
   private createSessionHeader(): vscode.TreeItem {
@@ -410,7 +488,16 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
     if (suggestions.length === 0) {
       return [new InfoItem('Review queue is clear', 'New suggestions will stay here until reviewed.', new vscode.ThemeIcon('check'))];
     }
-    const items: vscode.TreeItem[] = suggestions.map(suggestion => new SuggestionItem(suggestion, this.documentSync.getDocumentUri(suggestion.docId)));
+    const groups = buildSuggestionGroups(suggestions);
+    const items: vscode.TreeItem[] = [];
+    if (groups.some(group => group.suggestions.length > SUGGESTION_CHUNK_SIZE)) {
+      items.push(new InfoItem('Large review queue', `Grouped by file and chunked in sets of ${SUGGESTION_CHUNK_SIZE}`, new vscode.ThemeIcon('info')));
+    }
+    items.push(...groups.map(group => {
+      const targetUri = this.documentSync.getDocumentUri(group.docId);
+      const label = targetUri ? describeLocation(targetUri) : 'Shared document';
+      return new SuggestionGroupItem(group, label);
+    }));
     items.push(new ActionItem('Accept all pending', 'coderooms.acceptPendingSuggestions', [], new vscode.ThemeIcon('pass')));
     items.push(new ActionItem('Reject all pending', 'coderooms.clearPendingSuggestions', [], new vscode.ThemeIcon('trash')));
     return items;

@@ -1,34 +1,54 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+var visibleTextEditors: any[];
+var createDecorationTypeSpy: ReturnType<typeof vi.fn>;
 
 vi.mock('vscode', () => {
+  visibleTextEditors = [];
+  createDecorationTypeSpy = vi.fn(() => ({ dispose: vi.fn() }));
+
   class EventEmitter<T> {
-    private listeners: Array<(e: T) => void> = [];
-    event = (listener: (e: T) => void) => {
+    private listeners: Array<(event: T) => void> = [];
+    event = (listener: (event: T) => void) => {
       this.listeners.push(listener);
       return { dispose: () => {} };
     };
-    fire(data?: T) {
-      this.listeners.forEach(fn => fn(data as T));
+    fire(event?: T) {
+      for (const listener of this.listeners) {
+        listener(event as T);
+      }
     }
-    dispose() { this.listeners = []; }
+    dispose() {
+      this.listeners = [];
+    }
   }
+
   class Disposable {
-    constructor(private readonly _dispose?: () => void) {}
-    dispose() { this._dispose?.(); }
+    constructor(private readonly disposeFn?: () => void) {}
+    dispose() {
+      this.disposeFn?.();
+    }
   }
+
   class Position {
     constructor(readonly line: number, readonly character: number) {}
   }
+
   class Range {
     constructor(readonly start: Position, readonly end: Position) {}
   }
+
   return {
     EventEmitter,
     Disposable,
     Position,
     Range,
+    DecorationRangeBehavior: {
+      ClosedClosed: 0
+    },
     window: {
-      visibleTextEditors: []
+      visibleTextEditors,
+      createTextEditorDecorationType: createDecorationTypeSpy
     }
   };
 });
@@ -36,10 +56,20 @@ vi.mock('vscode', () => {
 import { CursorManager } from '../src/core/CursorManager';
 
 describe('CursorManager', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    visibleTextEditors.length = 0;
+  });
+
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+    visibleTextEditors.length = 0;
+  });
+
   it('adds and retrieves cursors', () => {
     const manager = new CursorManager();
     manager.updateCursor('u1', 'Alice', 'file:///test.ts', { line: 0, character: 5 });
-    // Should not throw
     expect(() => manager.refreshDecorations()).not.toThrow();
   });
 
@@ -68,9 +98,36 @@ describe('CursorManager', () => {
 
   it('assigns consistent colors per userId', () => {
     const manager = new CursorManager();
-    // Test that the same userId always gets the same color by calling update twice
     manager.updateCursor('u1', 'Alice', 'file:///a.ts', { line: 0, character: 0 });
     manager.updateCursor('u1', 'Alice', 'file:///b.ts', { line: 1, character: 1 });
     expect(() => manager.refreshDecorations()).not.toThrow();
+  });
+
+  it('does not repaint identical cursor decorations repeatedly', () => {
+    const setDecorations = vi.fn();
+    visibleTextEditors.push({
+      document: {
+        uri: { toString: () => 'file:///test.ts' },
+        lineCount: 1,
+        lineAt: () => ({ text: 'hello world' })
+      },
+      setDecorations
+    });
+
+    const manager = new CursorManager();
+    manager.updateCursor('u1', 'Alice', 'file:///test.ts', { line: 0, character: 5 });
+    vi.runAllTimers();
+
+    expect(setDecorations).toHaveBeenCalledTimes(2);
+
+    manager.updateCursor('u1', 'Alice', 'file:///test.ts', { line: 0, character: 5 });
+    vi.runAllTimers();
+
+    expect(setDecorations).toHaveBeenCalledTimes(2);
+
+    manager.updateCursor('u1', 'Alice', 'file:///test.ts', { line: 0, character: 6 });
+    vi.runAllTimers();
+
+    expect(setDecorations).toHaveBeenCalledTimes(3);
   });
 });

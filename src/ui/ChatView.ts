@@ -56,13 +56,18 @@ export class ChatView implements vscode.WebviewViewProvider {
     const plan = buildChatRenderPlan(this.lastRenderedMessageIds, this.chatManager.getMessages());
     this.lastRenderedMessageIds = plan.messageIds;
 
-    if (plan.append && plan.messages.length === 0) {
+    if (plan.append && plan.messages.length === 0 && plan.dropHeadCount === 0) {
       return;
     }
 
     const chunks = chunkChatMessages(plan.messages, 50);
     if (chunks.length === 0) {
-      this.view.webview.postMessage({ type: 'messages', payload: [], append: false });
+      this.view.webview.postMessage({
+        type: 'messages',
+        payload: [],
+        append: plan.append,
+        dropHeadCount: plan.dropHeadCount
+      });
       return;
     }
 
@@ -70,7 +75,8 @@ export class ChatView implements vscode.WebviewViewProvider {
       this.view.webview.postMessage({
         type: 'messages',
         payload: chunk,
-        append: plan.append || index > 0
+        append: plan.append || index > 0,
+        dropHeadCount: index === 0 ? plan.dropHeadCount : 0
       });
     }
   }
@@ -363,12 +369,14 @@ export class ChatView implements vscode.WebviewViewProvider {
       let lastAuthor = '';
       let lastTime = 0;
 
-      function renderMessages(messages, append = false) {
+      function renderMessages(messages, append = false, dropHeadCount = 0) {
         if (!append) {
           list.innerHTML = '';
           lastDate = '';
           lastAuthor = '';
           lastTime = 0;
+        } else if (dropHeadCount > 0) {
+          trimHeadMessages(dropHeadCount);
         }
 
         const hasMessages = append ? list.children.length > 0 || messages.length > 0 : messages.length > 0;
@@ -458,10 +466,33 @@ export class ChatView implements vscode.WebviewViewProvider {
         }
       }
 
+      function trimHeadMessages(messageCount) {
+        let remaining = messageCount;
+        while (remaining > 0 && list.firstChild) {
+          const node = list.firstChild;
+          const isMessageNode = node.classList?.contains('chat-row') || node.classList?.contains('system-row');
+          list.removeChild(node);
+          if (isMessageNode) {
+            remaining -= 1;
+          }
+        }
+        while (list.firstChild?.classList?.contains('date-divider')) {
+          list.removeChild(list.firstChild);
+        }
+        if (!list.childNodes.length) {
+          lastDate = '';
+          lastAuthor = '';
+          lastTime = 0;
+        }
+      }
+
       function escapeHtml(s) {
-        const div = document.createElement('div');
-        div.textContent = s;
-        return div.innerHTML;
+        return String(s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
       }
 
       // Auto-scroll detection
@@ -487,7 +518,7 @@ export class ChatView implements vscode.WebviewViewProvider {
 
       window.addEventListener('message', event => {
         if (event.data?.type === 'messages') {
-          renderMessages(event.data.payload, event.data.append);
+          renderMessages(event.data.payload, event.data.append, event.data.dropHeadCount || 0);
         }
         if (event.data?.type === 'focus') {
           input.focus();

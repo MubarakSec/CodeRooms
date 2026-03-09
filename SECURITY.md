@@ -7,6 +7,12 @@ This document records the current security posture that was reviewed while harde
 - Local development may use `ws://127.0.0.1:5171`.
 - Remote/shared deployments should use `wss://` with TLS enabled either directly in CodeRooms or through a reverse proxy.
 - Plain remote `ws://` should be treated as trusted-network-only and not as the recommended production posture.
+- Recommended production shape:
+  - terminate TLS at CodeRooms or a reverse proxy
+  - forward WebSocket upgrade headers correctly
+  - restrict direct server exposure with firewall or private-network rules
+  - persist backups on durable storage
+  - capture stdout/stderr into your process supervisor or centralized logs
 
 ## Access Control Review
 
@@ -38,3 +44,17 @@ This document records the current security posture that was reviewed while harde
 - Join, chat, suggestion, cursor, and participant-activity paths are rate-limited.
 - Connection and room creation are bounded per IP.
 - Document size, total server document bytes, suggestion counts, and message payload sizes are capped.
+
+## Protocol Misuse Review
+
+The following protocol-misuse cases were explicitly reviewed while hardening the current release candidate:
+
+- forged suggestion author identity
+- viewer attempts to edit shared documents
+- collaborator attempts to perform owner-only actions
+- duplicate join/create races
+- replayed tracked actions after reconnect
+- malformed patch, cursor, and selection payloads
+- repeated suggestion review requests after a suggestion is already resolved
+
+The server currently fails these closed through authorization checks, runtime protocol validation, idempotent tracked responses, or rate limiting.

@@ -1,5 +1,7 @@
 import { Participant, Role, RoomMode } from '../connection/MessageTypes';
 
+const PARTICIPANT_ACTIVITY_TTL_MS = 2_000;
+
 export class RoomState {
   private roomId?: string;
   private userId?: string;
@@ -156,7 +158,32 @@ export class RoomState {
     if (!at) {
       return false;
     }
-    return Date.now() - at < 2000;
+    return Date.now() - at < PARTICIPANT_ACTIVITY_TTL_MS;
+  }
+
+  pruneExpiredParticipantActivity(now = Date.now()): boolean {
+    let changed = false;
+    for (const [userId, at] of this.participantActivity) {
+      if (now - at >= PARTICIPANT_ACTIVITY_TTL_MS) {
+        this.participantActivity.delete(userId);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  getNextParticipantActivityExpiry(now = Date.now()): number | undefined {
+    let nextExpiry: number | undefined;
+    for (const at of this.participantActivity.values()) {
+      const expiry = at + PARTICIPANT_ACTIVITY_TTL_MS;
+      if (expiry <= now) {
+        return now;
+      }
+      if (nextExpiry === undefined || expiry < nextExpiry) {
+        nextExpiry = expiry;
+      }
+    }
+    return nextExpiry;
   }
 
   setMode(mode: RoomMode | undefined): void {

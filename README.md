@@ -12,6 +12,14 @@ Real-time collaborative coding inside VS Code — no screen sharing, just shared
 >
 > **See [SECURITY.md](SECURITY.md) for the supported deployment model and security review notes.**
 >
+> **See [PERFORMANCE.md](PERFORMANCE.md) for the Milestone 7 profiling harness and responsiveness budgets.**
+>
+> **See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for logging guidance and common operational failures.**
+>
+> **See [MIGRATIONS.md](MIGRATIONS.md) for persisted-state compatibility notes.**
+>
+> **See [QA_CHECKLIST.md](QA_CHECKLIST.md) for the manual VS Code release validation path.**
+>
 > **See [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) for the Milestone 0 release gate checklist.**
 
 ---
@@ -52,6 +60,8 @@ npm run server:start
 # 4. Verify local guardrails before shipping changes
 npm run verify
 npm run test:coverage
+npm run perf:profile
+npm run test:stress
 ```
 
 In the Extension Development Host, run **CodeRooms: Start Room as Root** from the Command Palette.
@@ -156,6 +166,8 @@ npm run typecheck        # Type-check without emitting
 npm run bundle           # Bundle with esbuild for packaging
 npm run server:build     # Compile the server
 npm test                 # Run all tests (vitest)
+npm run perf:profile     # Run the Milestone 7 performance harness
+npm run test:stress      # Run live reconnect/restart stress plus perf profile
 npm run package          # Package as .vsix
 ```
 

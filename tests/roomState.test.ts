@@ -137,6 +137,16 @@ describe('RoomState', () => {
     expect(state.isParticipantTyping('b')).toBe(false);
   });
 
+  it('tracks and prunes participant activity expirations', () => {
+    const state = new RoomState();
+    state.setParticipantActivity('a', 1_000);
+    state.setParticipantActivity('b', 1_500);
+
+    expect(state.getNextParticipantActivityExpiry(1_600)).toBe(3_000);
+    expect(state.pruneExpiredParticipantActivity(3_100)).toBe(true);
+    expect(state.getNextParticipantActivityExpiry(3_100)).toBe(3_500);
+  });
+
   it('room mode set and get', () => {
     const state = new RoomState();
     state.setMode('classroom');

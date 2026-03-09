@@ -232,20 +232,23 @@ export class DocumentSync {
     return shared.concat(pending);
   }
 
-  async setActiveDocument(docId: string, reveal = true): Promise<void> {
+  async setActiveDocument(docId: string, reveal = true): Promise<vscode.TextEditor | undefined> {
     if (!this.documents.has(docId) && !this.pendingShareDocs.has(docId)) {
-      return;
+      return undefined;
     }
     this.updateActiveDocumentState(docId);
     if (this.pendingShareDocs.has(docId)) {
       if (reveal) {
-        await vscode.window.showTextDocument(this.pendingShareDocs.get(docId)!.sharedDocument, { preview: false });
+        const editor = await this.revealDocumentIfNeeded(this.pendingShareDocs.get(docId)!.sharedDocument);
+        this.emitSharedDocChanged();
+        return editor;
       }
       this.emitSharedDocChanged();
-      return;
+      return this.findVisibleEditor(this.pendingShareDocs.get(docId)!.sharedDocument.uri);
     }
-    await this.ensureDocumentIsOpen(docId, reveal);
+    const editor = await this.ensureDocumentIsOpen(docId, reveal);
     this.emitSharedDocChanged();
+    return editor;
   }
 
   syncActiveEditor(editor?: vscode.TextEditor): void {
@@ -340,9 +343,11 @@ export class DocumentSync {
       return;
     }
 
-    await this.setActiveDocument(docId, true);
-    const document = await vscode.workspace.openTextDocument(targetUri);
-    const editor = await vscode.window.showTextDocument(document, { preview: false });
+    const editor = await this.setActiveDocument(docId, true);
+    if (!editor) {
+      logger.warn(`Unable to follow root cursor for docId=${docId}: editor is unavailable.`);
+      return;
+    }
     const pos = new vscode.Position(position.line, position.character);
     const selection = new vscode.Selection(pos, pos);
     editor.selection = selection;
@@ -729,10 +734,10 @@ export class DocumentSync {
     });
   }
 
-  private async ensureDocumentIsOpen(docId: string, reveal: boolean): Promise<void> {
+  private async ensureDocumentIsOpen(docId: string, reveal: boolean): Promise<vscode.TextEditor | undefined> {
     const tracked = this.documents.get(docId);
     if (!tracked) {
-      return;
+      return undefined;
     }
     let targetUri = tracked.uri ?? this.remoteToLocal.get(docId);
     if (!targetUri) {
@@ -746,10 +751,17 @@ export class DocumentSync {
     }
     if (!targetUri) {
       logger.warn(`No local mapping found for document ${docId}`);
-      return;
+      return undefined;
     }
     try {
-      let document = await vscode.workspace.openTextDocument(targetUri);
+      const visibleEditor = this.findVisibleEditor(targetUri);
+      let document = tracked.sharedDocument;
+      if (!document || this.uriKey(document.uri) !== this.uriKey(targetUri)) {
+        document = visibleEditor?.document;
+      }
+      if (!document || this.uriKey(document.uri) !== this.uriKey(targetUri)) {
+        document = await vscode.workspace.openTextDocument(targetUri);
+      }
       if (tracked.languageId && tracked.languageId !== document.languageId) {
         try {
           document = await vscode.languages.setTextDocumentLanguage(document, tracked.languageId);
@@ -761,12 +773,14 @@ export class DocumentSync {
       tracked.uri = document.uri;
       this.registerLocalMapping(docId, document.uri);
       await this.applyPendingFullSync(docId);
-      if (reveal) {
-        await vscode.window.showTextDocument(document, { preview: false });
-      }
       tracked.lastSyncedText = document.getText();
+      if (reveal) {
+        return await this.revealDocumentIfNeeded(document, visibleEditor);
+      }
+      return visibleEditor;
     } catch (error) {
       logger.warn(`Unable to open shared document ${docId}: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
     }
   }
 
@@ -996,5 +1010,25 @@ export class DocumentSync {
       return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
     }
     return uri.toString();
+  }
+
+  private findVisibleEditor(uri: vscode.Uri): vscode.TextEditor | undefined {
+    const target = this.uriKey(uri);
+    return vscode.window.visibleTextEditors.find(editor => this.uriKey(editor.document.uri) === target);
+  }
+
+  private async revealDocumentIfNeeded(
+    document: vscode.TextDocument,
+    preferredEditor?: vscode.TextEditor
+  ): Promise<vscode.TextEditor | undefined> {
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor && this.uriKey(activeEditor.document.uri) === this.uriKey(document.uri)) {
+      return activeEditor;
+    }
+    const existingEditor = preferredEditor ?? this.findVisibleEditor(document.uri);
+    if (existingEditor && activeEditor === existingEditor) {
+      return existingEditor;
+    }
+    return vscode.window.showTextDocument(existingEditor?.document ?? document, { preview: false });
   }
 }

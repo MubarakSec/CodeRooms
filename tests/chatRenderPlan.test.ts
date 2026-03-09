@@ -35,7 +35,19 @@ describe('chat render plan', () => {
     expect(changedPlan.append).toBe(false);
     expect(changedPlan.messages.map(entry => entry.messageId)).toEqual(['m1', 'm9']);
     expect(clearedPlan.append).toBe(false);
+    expect(clearedPlan.dropHeadCount).toBe(0);
     expect(clearedPlan.messages).toEqual([]);
+  });
+
+  it('drops the head and appends only the new tail when the message window slides', () => {
+    const plan = buildChatRenderPlan(
+      ['m1', 'm2', 'm3'],
+      [message('m2'), message('m3'), message('m4')]
+    );
+
+    expect(plan.append).toBe(true);
+    expect(plan.dropHeadCount).toBe(1);
+    expect(plan.messages.map(entry => entry.messageId)).toEqual(['m4']);
   });
 
   it('chunks large message sets into fixed-size slices', () => {
