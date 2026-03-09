@@ -6,21 +6,9 @@
 
 Real-time collaborative coding inside VS Code — no screen sharing, just shared buffers, roles, and quick actions. CodeRooms pairs a lightweight Node.js WebSocket server with a VS Code extension so teams can create rooms, share documents, chat, and code together without leaving the editor.
 
-> **See [INSTALLATION.md](INSTALLATION.md) for detailed setup instructions.**
+> **See [INSTALLATION.md](docs/INSTALLATION.md) for detailed setup instructions.**
 >
-> **See [RECOVERY.md](RECOVERY.md) for restart and persistence semantics.**
->
-> **See [SECURITY.md](SECURITY.md) for the supported deployment model and security review notes.**
->
-> **See [PERFORMANCE.md](PERFORMANCE.md) for the Milestone 7 profiling harness and responsiveness budgets.**
->
-> **See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for logging guidance and common operational failures.**
->
-> **See [MIGRATIONS.md](MIGRATIONS.md) for persisted-state compatibility notes.**
->
-> **See [QA_CHECKLIST.md](QA_CHECKLIST.md) for the manual VS Code release validation path.**
->
-> **See [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) for the Milestone 0 release gate checklist.**
+> **See [SECURITY.md](docs/SECURITY.md) for the supported deployment model and security review notes.**
 
 ---
 
@@ -66,7 +54,7 @@ npm run test:stress
 
 In the Extension Development Host, run **CodeRooms: Start Room as Root** from the Command Palette.
 
-> Full setup details, TLS configuration, and packaging instructions are in **[INSTALLATION.md](INSTALLATION.md)**.
+> Full setup details, TLS configuration, and packaging instructions are in **[INSTALLATION.md](docs/INSTALLATION.md)**.
 
 ---
 
@@ -128,7 +116,6 @@ Resolution order: CLI → environment variable → config file → default.
 - Display names capped at 50 characters; message payloads capped at 512 KB.
 - No built-in TLS — run behind a reverse proxy (nginx, Caddy) for production use.
 - Room state persisted via atomic JSON backups; auto-restored on restart.
-- Restart behavior and recoverable-state boundaries are documented in [RECOVERY.md](RECOVERY.md).
 
 ---
 
