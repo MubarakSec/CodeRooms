@@ -416,12 +416,15 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
       }
     }
 
-    if (this.roomState.isCollaborator()) {
+    const role = this.roomState.getRole();
+    if (role === 'collaborator' || role === 'viewer') {
       const following = this.followController.isFollowing();
       const followLabel = following ? 'Stop following' : 'Follow owner';
       const followIcon = new vscode.ThemeIcon(following ? 'eye-closed' : 'eye');
       items.push(new ActionItem(followLabel, 'coderooms.toggleFollowRoot', [], followIcon));
+    }
 
+    if (role === 'collaborator') {
       const direct = this.roomState.isCollaboratorInDirectMode();
       const modeLabel = direct ? 'Use suggestion mode' : 'Use direct edit';
       const modeIcon = new vscode.ThemeIcon(direct ? 'comment' : 'edit');

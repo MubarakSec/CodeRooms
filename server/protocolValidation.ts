@@ -158,6 +158,8 @@ export function validateClientMessage(msg: unknown): msg is ClientToServerMessag
         && isBoundedOptionalString(m.sessionToken, MAX_AUTH_FIELD_LENGTH);
     case 'leaveRoom':
       return true;
+    case 'removeParticipant':
+      return isNonEmptyBoundedString(m.userId, MAX_SIMPLE_ID_LENGTH);
     case 'updateRole':
       return isNonEmptyBoundedString(m.userId, MAX_SIMPLE_ID_LENGTH) && isRoleUpdateValue(m.role);
     case 'shareDocument':

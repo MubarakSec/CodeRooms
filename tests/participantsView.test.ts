@@ -183,4 +183,26 @@ describe('ParticipantsView refresh gating', () => {
     const firstChunkItems = await view.getChildren(groupChildren[0]);
     expect(firstChunkItems).toHaveLength(25);
   });
+
+  it('shows follow owner for viewers without exposing collaborator edit toggles', async () => {
+    const deps = createDependencies();
+    deps.roomState.getRole = () => 'viewer';
+    deps.roomState.isRoot = () => false;
+
+    const view = new ParticipantsView(
+      deps.roomState,
+      deps.documentSync,
+      deps.suggestionManager,
+      deps.followController
+    );
+
+    const roots = await view.getChildren();
+    const workSection = roots.find(item => item.label === 'Work');
+    const workChildren = await view.getChildren(workSection);
+    const labels = workChildren.map(item => item.label);
+
+    expect(labels).toContain('Follow owner');
+    expect(labels).not.toContain('Use direct edit');
+    expect(labels).not.toContain('Use suggestion mode');
+  });
 });

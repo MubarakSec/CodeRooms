@@ -54,7 +54,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let isConnected = false;
   let connectionPromise: Promise<void> | undefined;
   const outboundQueue = new OutboundMessageQueue(message => webSocket.send(message));
-  const pendingRoleUpdates = new Map<string, NodeJS.Timeout>();
+  const pendingParticipantActions = new Map<string, NodeJS.Timeout>();
   let lastRootCursorMessage: Extract<ServerToClientMessage, { type: 'rootCursor' }> | undefined;
   let e2eKey: Buffer | undefined;     // AES-256-GCM key derived from room secret — null when no secret
   let pendingSecret: string | undefined; // secret held in memory until roomId is known for key derivation
@@ -130,6 +130,16 @@ export function activate(context: vscode.ExtensionContext): void {
   let lastJoinSessionToken: string | undefined;
   let refreshTimer: NodeJS.Timeout | undefined;
   let participantActivityExpiryTimer: NodeJS.Timeout | undefined;
+  const canFollowRoot = (): boolean => {
+    const role = roomState.getRole();
+    return role === 'collaborator' || role === 'viewer';
+  };
+  const clearJoinIntent = (): void => {
+    lastJoinRoomId = undefined;
+    lastJoinDisplayName = undefined;
+    lastJoinSecret = undefined;
+    lastJoinSessionToken = undefined;
+  };
 
   const followDisposable = followController.onDidChange(async () => {
     statusBar.update();
@@ -338,8 +348,8 @@ export function activate(context: vscode.ExtensionContext): void {
     cursorManager.clearAll();
     chatManager.setRoom(undefined);
     outboundQueue.clear();
-    pendingRoleUpdates.forEach(timer => clearTimeout(timer));
-    pendingRoleUpdates.clear();
+    pendingParticipantActions.forEach(timer => clearTimeout(timer));
+    pendingParticipantActions.clear();
     clearParticipantActivityExpiryTimer();
     noticeCooldown.clear();
     lastRootCursorMessage = undefined;
@@ -486,22 +496,26 @@ export function activate(context: vscode.ExtensionContext): void {
         break;
       }
       case 'participantLeft': {
+        const departingParticipant = roomState.getParticipants().find(p => p.userId === message.userId);
+        const wasRemoved = pendingParticipantActions.has(message.userId);
         roomState.removeParticipant(message.userId);
         cursorManager.removeCursor(message.userId);
         await logRoomEvent({ type: 'left', userId: message.userId });
         scheduleRefresh();
-        const pendingTimer = pendingRoleUpdates.get(message.userId);
+        const pendingTimer = pendingParticipantActions.get(message.userId);
         if (pendingTimer) {
           clearTimeout(pendingTimer);
-          pendingRoleUpdates.delete(message.userId);
+          pendingParticipantActions.delete(message.userId);
         }
         if (roomState.getRoomId()) {
           chatManager.addMessage({
             messageId: uuidv4(),
             fromUserId: message.userId,
-            fromName: 'System',
+            fromName: departingParticipant?.displayName ?? 'System',
             role: 'viewer',
-            content: `Participant left (${message.userId})`,
+            content: departingParticipant
+              ? `${departingParticipant.displayName} ${wasRemoved ? 'was removed from the room' : 'left the room'}`
+              : `Participant left (${message.userId})`,
             timestamp: Date.now(),
             isSystem: true
           });
@@ -520,10 +534,10 @@ export function activate(context: vscode.ExtensionContext): void {
             void showInfoNotice(`role-updated:${message.userId}:${message.role}`, `${target.displayName} is now ${message.role}.`, 1500);
           }
         }
-        const pendingTimer = pendingRoleUpdates.get(message.userId);
+        const pendingTimer = pendingParticipantActions.get(message.userId);
         if (pendingTimer) {
           clearTimeout(pendingTimer);
-          pendingRoleUpdates.delete(message.userId);
+          pendingParticipantActions.delete(message.userId);
         }
         break;
       }
@@ -690,6 +704,11 @@ export function activate(context: vscode.ExtensionContext): void {
           case 'ROOM_NOT_FOUND':
             void vscode.window.showErrorMessage('Room not found. Double-check the invite code.');
             break;
+          case 'ROOM_CLOSED':
+            clearJoinIntent();
+            void showWarningNotice('room-closed', getRoomClosedNotice(), 3000);
+            resetState();
+            break;
           case 'PATCH_INVALID':
             void showWarningNotice('patch-invalid', getDocumentResyncNotice(), 3000);
             break;
@@ -720,6 +739,11 @@ export function activate(context: vscode.ExtensionContext): void {
           case 'ROOM_STATE_INVALID':
             void showWarningNotice('room-state-invalid', getRoomStateInvalidNotice(), 3000);
             break;
+          case 'REMOVED_FROM_ROOM':
+            clearJoinIntent();
+            void showWarningNotice('removed-from-room', 'You were removed from the room by the owner.', 3000);
+            resetState();
+            break;
           case 'SUGGESTION_ALREADY_REVIEWED':
             void showWarningNotice('suggestion-reviewed', 'That suggestion has already been reviewed.', 3000);
             break;
@@ -730,6 +754,7 @@ export function activate(context: vscode.ExtensionContext): void {
             if (payload.toLowerCase().includes('room not found')) {
               void vscode.window.showErrorMessage('Room not found. Double-check the invite code.');
             } else if (payload.toLowerCase().includes('room closed')) {
+              clearJoinIntent();
               void showWarningNotice('room-closed', getRoomClosedNotice(), 3000);
               resetState();
             } else {
@@ -806,10 +831,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     webSocket.send({ type: 'leaveRoom' });
-    lastJoinRoomId = undefined;
-    lastJoinDisplayName = undefined;
-    lastJoinSecret = undefined;
-    lastJoinSessionToken = undefined;
+    clearJoinIntent();
     resetState();
   }
 
@@ -832,8 +854,8 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   function toggleFollowRoot(): void {
-    if (!roomState.isCollaborator()) {
-      void vscode.window.showInformationMessage('Follow mode is available for collaborators.');
+    if (!canFollowRoot()) {
+      void vscode.window.showInformationMessage('Follow mode is available for collaborators and viewers.');
       return;
     }
     if (!roomState.getRoomId()) {
@@ -932,7 +954,7 @@ export function activate(context: vscode.ExtensionContext): void {
       { label: '$(info) Show status', description: 'Connection, room, doc, follow' }
     ];
 
-    if (roomState.isCollaborator()) {
+    if (canFollowRoot()) {
       const followLabel = followController.isFollowing() ? '$(eye-closed) Stop follow root' : '$(eye) Start follow root';
       options.push({ label: followLabel, description: 'Current: ' + (followController.isFollowing() ? 'ON' : 'OFF') });
     }
@@ -999,14 +1021,14 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     const timer = setTimeout(() => {
-      pendingRoleUpdates.delete(participant.userId);
+      pendingParticipantActions.delete(participant.userId);
       void vscode.window.showWarningMessage(`Role change for ${participant.displayName} not confirmed. The user may be offline or permissions blocked.`);
     }, 5000);
-    const existing = pendingRoleUpdates.get(participant.userId);
+    const existing = pendingParticipantActions.get(participant.userId);
     if (existing) {
       clearTimeout(existing);
     }
-    pendingRoleUpdates.set(participant.userId, timer);
+    pendingParticipantActions.set(participant.userId, timer);
     webSocket.send({ type: 'updateRole', userId: participant.userId, role });
     void vscode.window.showInformationMessage(`Requested ${participant.displayName} to switch to ${role}.`);
   }
@@ -1029,16 +1051,16 @@ export function activate(context: vscode.ExtensionContext): void {
     leaveRoom();
   }
 
-  function handleSetParticipantRole(target: ParticipantLike, role: Role): void {
+  function handleSetParticipantRole(target: ParticipantLike, role: Extract<Role, 'collaborator' | 'viewer'>): void {
     if (!roomState.isRoot()) {
+      return;
+    }
+    if (!roomState.getRoomId()) {
+      void vscode.window.showWarningMessage('Join or start a room first.');
       return;
     }
     const participant = extractParticipant(target);
     if (!participant) {
-      return;
-    }
-    if (role === 'root') {
-      void vscode.window.showWarningMessage('Transferring ownership is not supported in this version.');
       return;
     }
     webSocket.send({ type: 'updateRole', userId: participant.userId, role });
@@ -1049,25 +1071,25 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showWarningMessage('Only the room owner can manage participants.');
       return;
     }
+    if (!roomState.getRoomId()) {
+      void vscode.window.showWarningMessage('Join or start a room first.');
+      return;
+    }
     const participant = extractParticipant(target);
     if (!participant) {
       return;
     }
-    if (participant.role === 'viewer') {
-      void vscode.window.showInformationMessage(`${participant.displayName} is already a viewer.`);
-      return;
-    }
     const timer = setTimeout(() => {
-      pendingRoleUpdates.delete(participant.userId);
-      void vscode.window.showWarningMessage(`Viewer request for ${participant.displayName} not confirmed. The user may be offline or permissions blocked.`);
+      pendingParticipantActions.delete(participant.userId);
+      void vscode.window.showWarningMessage(`Removal of ${participant.displayName} was not confirmed. The user may be offline or the server may have rejected the request.`);
     }, 5000);
-    const existing = pendingRoleUpdates.get(participant.userId);
+    const existing = pendingParticipantActions.get(participant.userId);
     if (existing) {
       clearTimeout(existing);
     }
-    pendingRoleUpdates.set(participant.userId, timer);
-    webSocket.send({ type: 'updateRole', userId: participant.userId, role: 'viewer' });
-    void vscode.window.showInformationMessage(`Requested ${participant.displayName} to switch to viewer mode.`);
+    pendingParticipantActions.set(participant.userId, timer);
+    webSocket.send({ type: 'removeParticipant', userId: participant.userId });
+    void vscode.window.showInformationMessage(`Requested removal of ${participant.displayName} from the room.`);
   }
 
   async function handleSuggestionAction(target: SuggestionLike, action: 'accept' | 'reject'): Promise<void> {
@@ -1243,7 +1265,6 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('coderooms.changeParticipantRole', changeParticipantRole),
     vscode.commands.registerCommand('coderooms.copyRoomId', (arg?: unknown, roomIdArg?: string) => copyRoomId(typeof arg === 'string' ? arg : roomIdArg)),
     vscode.commands.registerCommand('coderooms.stopRoom', stopRoom),
-    vscode.commands.registerCommand('coderooms.setParticipantRoleRoot', item => handleSetParticipantRole(item, 'root')),
     vscode.commands.registerCommand('coderooms.setParticipantRoleCollaborator', item => handleSetParticipantRole(item, 'collaborator')),
     vscode.commands.registerCommand('coderooms.setParticipantRoleViewer', item => handleSetParticipantRole(item, 'viewer')),
     vscode.commands.registerCommand('coderooms.kickParticipant', handleKickParticipant),

@@ -40,6 +40,7 @@ export type ClientToServerMessage =
   | { type: "createRoom"; displayName: string; mode: RoomMode; secret?: string }
   | { type: "joinRoom"; roomId: string; displayName: string; secret?: string; token?: string; sessionToken?: string }
   | { type: "leaveRoom" }
+  | { type: "removeParticipant"; userId: string }
   | { type: "updateRole"; userId: string; role: "collaborator" | "viewer" }
   | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text: string; version: number }
   | { type: "unshareDocument"; roomId: string; documentId: string }

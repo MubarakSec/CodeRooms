@@ -35,7 +35,6 @@
         "onCommand:coderooms.changeParticipantRole",
         "onCommand:coderooms.copyRoomId",
         "onCommand:coderooms.stopRoom",
-        "onCommand:coderooms.setParticipantRoleRoot",
         "onCommand:coderooms.setParticipantRoleCollaborator",
         "onCommand:coderooms.setParticipantRoleViewer",
         "onCommand:coderooms.kickParticipant",
@@ -138,16 +137,12 @@
                 "title": "CodeRooms: Stop Room"
             },
             {
-                "command": "coderooms.setParticipantRoleRoot",
-                "title": "CodeRooms: Set Role ? Root"
-            },
-            {
                 "command": "coderooms.setParticipantRoleCollaborator",
-                "title": "CodeRooms: Set Role ? Collaborator"
+                "title": "CodeRooms: Set Role to Collaborator"
             },
             {
                 "command": "coderooms.setParticipantRoleViewer",
-                "title": "CodeRooms: Set Role ? Viewer"
+                "title": "CodeRooms: Set Role to Viewer"
             },
             {
                 "command": "coderooms.kickParticipant",
@@ -267,11 +262,6 @@
                 }
             ],
             "view/item/context": [
-                {
-                    "group": "coderooms@1",
-                    "command": "coderooms.setParticipantRoleRoot",
-                    "when": "(view == coderoomsPanel || view == coderoomsParticipants) && viewItem == coderooms.participant.owner"
-                },
                 {
                     "group": "coderooms@1",
                     "command": "coderooms.setParticipantRoleCollaborator",

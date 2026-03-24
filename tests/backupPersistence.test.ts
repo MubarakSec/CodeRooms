@@ -61,6 +61,11 @@ describe('backup persistence helpers', () => {
     expect(corruptPath).toBe('/tmp/rooms-backup.json.corrupt-2026-03-08T11-10-00-000Z');
   });
 
+  it('preserves windows-style backup paths when adding the quarantine suffix', () => {
+    const corruptPath = getCorruptBackupPath('C:\\tmp\\rooms-backup.json', new Date('2026-03-08T11:10:00.000Z'));
+    expect(corruptPath).toBe('C:\\tmp\\rooms-backup.json.corrupt-2026-03-08T11-10-00-000Z');
+  });
+
   it('rejects corrupted backup JSON', () => {
     expect(() => parseRoomsBackup('{not valid json')).toThrow();
   });

@@ -1,4 +1,3 @@
-import path from 'path';
 import { RoomMode, Suggestion } from './types';
 
 export const ROOMS_BACKUP_VERSION = 1;
@@ -112,7 +111,7 @@ export function parseRoomsBackup(raw: string): ParsedRoomsBackup {
 
 export function getCorruptBackupPath(backupFile: string, now = new Date()): string {
   const timestamp = now.toISOString().replace(/[:.]/g, '-');
-  return path.join(path.dirname(backupFile), `${path.basename(backupFile)}.corrupt-${timestamp}`);
+  return `${backupFile}.corrupt-${timestamp}`;
 }
 
 export async function writeRoomsBackupAtomically(

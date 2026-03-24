@@ -21,7 +21,7 @@ Real-time collaborative coding inside VS Code — no screen sharing, just shared
 | **Suggestion Mode** | Collaborator edits become inline suggestions the root can accept or reject — great for code reviews and teaching. |
 | **Direct Edit Mode** | Toggle collaborators into direct edit mode when free-form collaboration is preferred. |
 | **Encrypted Chat** | In-editor chat panel with end-to-end encryption (AES-256-GCM) when a room secret is provided. |
-| **Follow Cursor** | Collaborators can follow the root's cursor across files in real time. |
+| **Follow Cursor** | Collaborators and viewers can follow the root's cursor across files in real time. |
 | **Participants Panel** | Tree view showing who's in the room, their role, edit mode, and activity status. |
 | **Invite Tokens** | Generate single-use invite tokens for secure room access. |
 | **Room Export** | Root can export the entire room (all shared documents) as a `.zip` archive. |
@@ -85,8 +85,8 @@ In the Extension Development Host, run **CodeRooms: Start Room as Root** from th
 | Toggle Collaborator Mode | Switch between direct edit and suggestion mode | Collaborator |
 | Toggle Follow Root | Follow or unfollow the root's cursor | Collaborator/Viewer |
 | Change Participant Role | Change a participant's role | Root |
-| Set Role → Root / Collaborator / Viewer | Quick role assignment from context menu | Root |
-| Remove Participant | Kick a participant from the room | Root |
+| Set Role to Collaborator / Viewer | Quick role assignment from context menu | Root |
+| Remove Participant | Remove a participant from the room | Root |
 | Accept / Reject Suggestion | Act on a pending suggestion | Root |
 | Generate Invite Token | Create a single-use join token | Root |
 | Open Chat / Send Chat Message | Chat with room participants | Anyone in room |

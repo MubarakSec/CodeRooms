@@ -662,6 +662,9 @@ function handleMessage(context: ConnectionContext, message: unknown): void {
     case 'leaveRoom':
       cleanupRoomMembership(context);
       break;
+    case 'removeParticipant':
+      removeParticipant(context, message.userId);
+      break;
     case 'updateRole':
       updateRole(context, message.userId, message.role);
       break;
@@ -1020,7 +1023,7 @@ function cleanupRoomMembership(
       room.participants.clear();
       room.recoverableSessions.clear();
       for (const connection of peersToNotify) {
-        send(connection.ws as WebSocket, { type: 'error', message: 'Room closed by root user.' });
+        send(connection.ws as WebSocket, { type: 'error', message: 'Room closed by root user.', code: 'ROOM_CLOSED' });
         connection.ws.close();
       }
       deleteRoom(room.roomId);
@@ -1064,6 +1067,42 @@ function updateRole(context: ConnectionContext, userId: string, role: Role): voi
 
   auditRoomInvariants(room, 'update_role');
   broadcast(room, { type: 'roleUpdated', userId, role });
+}
+
+function removeParticipant(context: ConnectionContext, userId: string): void {
+  const room = getRoomForContext(context);
+  if (!room) {
+    sendError(context.ws, 'Join a room before removing participants.', 'ROOM_STATE_INVALID');
+    return;
+  }
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
+    sendError(context.ws, 'Only the room owner can remove participants.', 'FORBIDDEN');
+    return;
+  }
+  if (userId === room.ownerId) {
+    sendError(context.ws, 'The room owner cannot be removed.', 'FORBIDDEN');
+    return;
+  }
+
+  const participant = room.participants.get(userId);
+  if (!participant) {
+    sendError(context.ws, 'Participant not found.', 'TARGET_NOT_FOUND');
+    return;
+  }
+
+  room.participants.delete(userId);
+  room.recoverableSessions.delete(participant.sessionToken);
+
+  const targetConnection = room.connections.get(userId);
+  room.connections.delete(userId);
+  if (targetConnection) {
+    targetConnection.roomId = undefined;
+    targetConnection.role = undefined;
+    sendError(targetConnection.ws, 'You were removed from the room by the owner.', 'REMOVED_FROM_ROOM');
+  }
+
+  auditRoomInvariants(room, 'remove_participant');
+  broadcast(room, { type: 'participantLeft', userId });
 }
 
 function setEditMode(context: ConnectionContext, userId: string, direct: boolean): void {

@@ -127,16 +127,43 @@ export class ChatView implements vscode.WebviewViewProvider {
         border-bottom: 1px solid var(--border);
         background: linear-gradient(180deg, rgba(128,128,128,0.06), rgba(128,128,128,0.01));
       }
+      .chat-header.compact { padding-bottom: 10px; }
       .chat-title {
         font-size: 12px;
         font-weight: 700;
         letter-spacing: 0.2px;
         text-transform: uppercase;
       }
-      .chat-hint {
+      .chat-hint-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
         margin-top: 4px;
+      }
+      .chat-hint {
         font-size: 11px;
         color: var(--text-dim);
+      }
+      .chat-hint-row.hidden { display: none; }
+      .chat-hint-dismiss {
+        border: 1px solid transparent;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--text-dim);
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        line-height: 1;
+        padding: 2px 6px;
+      }
+      .chat-hint-dismiss:hover {
+        background: var(--hover-bg);
+        color: var(--vscode-editor-foreground);
+      }
+      .chat-hint-dismiss:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder);
+        outline-offset: 2px;
       }
 
       /* Empty state */
@@ -310,9 +337,12 @@ export class ChatView implements vscode.WebviewViewProvider {
   </head>
   <body>
     <div class="wrapper">
-      <div class="chat-header">
+      <div id="chatHeader" class="chat-header">
         <div id="chatTitle" class="chat-title">Room Chat</div>
-        <div class="chat-hint">Enter to send. Shift+Enter adds a new line.</div>
+        <div id="chatHintRow" class="chat-hint-row">
+          <div id="chatHint" class="chat-hint">Enter to send. Shift+Enter adds a new line.</div>
+          <button id="chatHintDismiss" class="chat-hint-dismiss" type="button" aria-label="Dismiss chat input tip" title="Dismiss chat input tip">Dismiss</button>
+        </div>
       </div>
       <div id="empty" class="empty-state">
         <div class="icon">\ud83d\udcac</div>
@@ -339,8 +369,24 @@ export class ChatView implements vscode.WebviewViewProvider {
       const input = document.getElementById('input');
       const sendBtn = document.getElementById('sendBtn');
       const scrollBtn = document.getElementById('scrollBtn');
+      const chatHeader = document.getElementById('chatHeader');
+      const chatHintRow = document.getElementById('chatHintRow');
+      const chatHintDismiss = document.getElementById('chatHintDismiss');
 
       let autoScroll = true;
+      let viewState = vscode.getState() || {};
+      let chatHintDismissed = Boolean(viewState.chatHintDismissed);
+
+      function syncChatHint() {
+        const hidden = chatHintDismissed;
+        chatHintRow.classList.toggle('hidden', hidden);
+        chatHeader.classList.toggle('compact', hidden);
+      }
+
+      function persistViewState() {
+        viewState = { ...viewState, chatHintDismissed };
+        vscode.setState(viewState);
+      }
 
       const formatTime = ts => {
         try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
@@ -509,6 +555,12 @@ export class ChatView implements vscode.WebviewViewProvider {
         scrollBtn.classList.remove('visible');
       });
 
+      chatHintDismiss.addEventListener('click', () => {
+        chatHintDismissed = true;
+        persistViewState();
+        syncChatHint();
+      });
+
       // Enable/disable send button
       input.addEventListener('input', () => {
         input.style.height = '36px';
@@ -543,6 +595,7 @@ export class ChatView implements vscode.WebviewViewProvider {
         }
       });
 
+      syncChatHint();
       setTimeout(() => input.focus(), 80);
     </script>
   </body>

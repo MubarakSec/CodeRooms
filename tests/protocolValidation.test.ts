@@ -119,6 +119,11 @@ describe('protocol validation helpers', () => {
     })).toBe(true);
 
     expect(validateClientMessage({
+      type: 'removeParticipant',
+      userId: 'user-2'
+    })).toBe(true);
+
+    expect(validateClientMessage({
       type: 'docChange',
       roomId: 'ROOM42',
       docId: 'doc-1',
@@ -226,6 +231,11 @@ describe('protocol validation helpers', () => {
       roomId: 'ROOM42',
       suggestionIds: ['s-1', '   '],
       action: 'accept'
+    })).toBe(false);
+
+    expect(validateClientMessage({
+      type: 'removeParticipant',
+      userId: '   '
     })).toBe(false);
   });
 });
