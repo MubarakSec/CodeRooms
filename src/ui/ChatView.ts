@@ -36,6 +36,9 @@ export class ChatView implements vscode.WebviewViewProvider {
         }
         void vscode.commands.executeCommand('coderooms.sendChatMessage', content);
       }
+      if (message?.type === 'voice') {
+        void vscode.commands.executeCommand('coderooms.joinVoice');
+      }
     });
     this.schedulePostMessages();
   }
@@ -134,8 +137,23 @@ export class ChatView implements vscode.WebviewViewProvider {
         border-bottom: 1px solid var(--border);
         z-index: 10;
         flex-shrink: 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
       }
+      .header-main { flex: 1; min-width: 0; }
       .chat-title { font-weight: 600; font-size: 12px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--text-dim); }
+      
+      .voice-btn {
+        background: var(--accent); color: white; border: none; border-radius: 8px;
+        padding: 4px 10px; font-size: 11px; font-weight: 600; cursor: pointer;
+        display: flex; align-items: center; gap: 6px; transition: all 0.2s;
+        margin-left: 12px; flex-shrink: 0;
+      }
+      .voice-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+      .voice-btn:active { transform: translateY(0); }
+      .voice-btn svg { width: 12px; height: 12px; fill: currentColor; }
+
       .chat-hint-row { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
       .chat-hint { font-size: 11px; color: var(--text-dim); }
       .chat-hint-row.hidden { display: none; }
@@ -279,11 +297,17 @@ export class ChatView implements vscode.WebviewViewProvider {
   <body>
     <div class="wrapper">
       <div id="chatHeader" class="chat-header">
-        <div id="chatTitle" class="chat-title">Session Chat</div>
-        <div id="chatHintRow" class="chat-hint-row">
-          <div class="chat-hint">Enter to send • Shift+Enter for new line</div>
-          <button id="chatHintDismiss" class="chat-hint-dismiss" aria-label="Dismiss chat input tip" title="Dismiss chat input tip">Dismiss</button>
+        <div class="header-main">
+          <div id="chatTitle" class="chat-title">Session Chat</div>
+          <div id="chatHintRow" class="chat-hint-row">
+            <div class="chat-hint">Enter to send • Shift+Enter for new line</div>
+            <button id="chatHintDismiss" class="chat-hint-dismiss" aria-label="Dismiss chat input tip" title="Dismiss chat input tip">Dismiss</button>
+          </div>
         </div>
+        <button id="voiceBtn" class="voice-btn" title="Join Voice Channel">
+          <svg viewBox="0 0 16 16"><path d="M8 11a3 3 0 0 0 3-3V3a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M13 8a5 5 0 0 1-10 0H2a6 6 0 0 0 12 0h-1z"/><path d="M8 14a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/></svg>
+          Join Voice
+        </button>
       </div>
       
       <div id="empty" class="empty-state">
@@ -432,8 +456,14 @@ export class ChatView implements vscode.WebviewViewProvider {
         scrollBtn.classList.toggle('visible', !atBottom);
       });
 
+      const voiceBtn = document.getElementById('voiceBtn');
+
       scrollBtn.addEventListener('click', () => {
         panel.scrollTop = panel.scrollHeight;
+      });
+
+      voiceBtn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'voice' });
       });
 
       document.getElementById('chatHintDismiss').addEventListener('click', () => {

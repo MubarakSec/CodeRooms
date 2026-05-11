@@ -70,8 +70,9 @@ interface DocumentState {
   version: number;
   originalUri: string;
   fileName: string;
-  languageId: string;
+  languageId?: string;
   patchHistory: VersionedPatch[];
+  yjsState?: Uint8Array;
 }
 
 interface ConnectionContext {
@@ -165,7 +166,18 @@ function buildPersistedRoomsSnapshot(): Record<string, PersistedRoomState> {
       ownerSessionToken: room.ownerSessionToken,
       ownerIp: room.ownerIp,
       recoverableSessions: Array.from(room.recoverableSessions.entries()),
-      documents: Array.from(room.documents.entries()),
+      documents: Array.from(room.documents.entries()).map(([docId, doc]) => [
+        docId,
+        {
+          docId: doc.docId,
+          text: doc.text,
+          version: doc.version,
+          originalUri: doc.originalUri,
+          fileName: doc.fileName,
+          languageId: doc.languageId,
+          yjsState: doc.yjsState ? Buffer.from(doc.yjsState).toString('base64') : undefined
+        }
+      ]),
       suggestions: Array.from(room.suggestions.entries()),
       mode: room.mode,
       secretHash: room.secretHash,
@@ -227,6 +239,7 @@ function loadRooms(): void {
           docId,
           {
             ...doc,
+            yjsState: doc.yjsState ? Uint8Array.from(Buffer.from(doc.yjsState, 'base64')) : undefined,
             patchHistory: []
           }
         ])
@@ -478,7 +491,7 @@ function attachConnectionHandlers(wss: WebSocketServer): void {
   });
 }
 
-function waitForListening(target: WebSocketServer | https.Server): Promise<void> {
+function waitForListening(target: WebSocketServer | http.Server | https.Server): Promise<void> {
   const address = 'address' in target ? target.address() : undefined;
   if (address) {
     return Promise.resolve();
@@ -564,6 +577,47 @@ export async function stopCodeRoomsServer(): Promise<void> {
 
 import { initRedis, subscribeToRoomBroadcasts, joinRoomPubSub, leaveRoomPubSub, broadcastToRoomPubSub } from './redis';
 
+import http from 'http';
+
+function handleHttpRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const url = req.url || '/';
+  if (url.startsWith('/voice/')) {
+    const roomId = url.split('/')[2];
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(renderVoiceBridgeHtml(roomId));
+    return;
+  }
+  res.writeHead(404);
+  res.end('Not Found');
+}
+
+function renderVoiceBridgeHtml(roomId: string): string {
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>CodeRooms Voice - ${roomId}</title>
+  <style>
+    body { background: #1e1e1e; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .status { font-size: 24px; margin-bottom: 20px; }
+    .mic { width: 100px; height: 100px; border-radius: 50%; background: #007acc; display: flex; align-items: center; justify-content: center; margin-bottom: 20px; box-shadow: 0 0 20px rgba(0,122,204,0.5); }
+    .mic svg { width: 50px; height: 50px; fill: #fff; }
+    .room { color: #888; }
+  </style>
+</head>
+<body>
+  <div class="mic"><svg viewBox="0 0 16 16"><path d="M8 11a3 3 0 0 0 3-3V3a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M13 8a5 5 0 0 1-10 0H2a6 6 0 0 0 12 0h-1z"/><path d="M8 14a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/></svg></div>
+  <div class="status" id="status">Connecting to Room...</div>
+  <div class="room">CodeRoom ID: <b>${roomId}</b></div>
+  <script>
+    const status = document.getElementById('status');
+    setTimeout(() => { status.innerText = 'Voice Connected (P2P Handshake Ready)'; }, 1000);
+  </script>
+</body>
+</html>
+  `;
+}
+
 export async function startCodeRoomsServer(options: StartCodeRoomsServerOptions = {}): Promise<StartedCodeRoomsServer> {
   if (activeWss) {
     throw new Error('CodeRooms server is already running in this process.');
@@ -596,18 +650,21 @@ export async function startCodeRoomsServer(options: StartCodeRoomsServerOptions 
   const tls = Boolean(options.certPath && options.keyPath);
 
   if (tls) {
-    activeHttpsServer = https.createServer({
+    const httpsServer = https.createServer({
       cert: fs.readFileSync(options.certPath!, 'utf-8'),
       key: fs.readFileSync(options.keyPath!, 'utf-8')
-    });
-    activeWss = new WebSocketServer({ server: activeHttpsServer, maxPayload: MAX_MESSAGE_BYTES });
+    }, handleHttpRequest);
+    activeHttpsServer = httpsServer;
+    activeWss = new WebSocketServer({ server: httpsServer, maxPayload: MAX_MESSAGE_BYTES });
     attachConnectionHandlers(activeWss);
-    activeHttpsServer.listen(requestedPort, requestedHost);
-    await waitForListening(activeHttpsServer);
+    httpsServer.listen(requestedPort, requestedHost);
+    await waitForListening(httpsServer);
   } else {
-    activeWss = new WebSocketServer({ port: requestedPort, host: requestedHost, maxPayload: MAX_MESSAGE_BYTES });
+    const httpServer = http.createServer(handleHttpRequest);
+    activeWss = new WebSocketServer({ server: httpServer, maxPayload: MAX_MESSAGE_BYTES });
     attachConnectionHandlers(activeWss);
-    await waitForListening(activeWss);
+    httpServer.listen(requestedPort, requestedHost);
+    await waitForListening(httpServer);
   }
 
   if (options.enableBackgroundTasks ?? true) {
@@ -694,6 +751,9 @@ function handleMessage(context: ConnectionContext, message: unknown): void {
       break;
     case 'awarenessUpdate':
       handleAwarenessUpdate(context, message);
+      break;
+    case 'voiceSignal':
+      handleVoiceSignal(context, message);
       break;
     case 'chatSend':
       handleChatSend(context, message);
@@ -1167,7 +1227,8 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
     originalUri: message.originalUri,
     fileName: message.fileName,
     languageId: message.languageId,
-    patchHistory: []
+    patchHistory: [],
+    yjsState: message.yjsState
   };
 
   room.documents.set(message.docId, doc);
@@ -1599,6 +1660,7 @@ function handleFullDocumentSync(
   totalDocBytes = nextTotalDocBytes;
   doc.text = message.text;
   doc.version = message.version;
+  doc.yjsState = message.yjsState;
   doc.patchHistory = []; // reset history on full sync
   room.documents.set(message.docId, doc);
 
@@ -1607,7 +1669,8 @@ function handleFullDocumentSync(
     roomId: room.roomId,
     docId: message.docId,
     text: message.text,
-    version: message.version
+    version: message.version,
+    yjsState: message.yjsState
   }, context.ws);
   sendAckForMessage(context.ws, message);
 }
@@ -1660,6 +1723,25 @@ function handleAwarenessUpdate(
     },
     context.ws
   );
+}
+
+function handleVoiceSignal(
+  context: ConnectionContext,
+  message: Extract<ClientToServerMessage, { type: 'voiceSignal' }>
+): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) {
+    return;
+  }
+  
+  const target = room.connections.get(message.targetUserId);
+  if (target && target.ws.readyState === WebSocket.OPEN) {
+    send(target.ws, {
+      type: 'voiceSignal',
+      fromUserId: context.userId,
+      signal: message.signal
+    });
+  }
 }
 
 function handleParticipantActivity(
@@ -1822,9 +1904,10 @@ function replayDocumentsToConnection(room: RoomState, context: ConnectionContext
       docId: doc.docId,
       originalUri: doc.originalUri,
       fileName: doc.fileName,
-      languageId: doc.languageId,
+      languageId: doc.languageId ?? 'text',
       text: doc.text,
-      version: doc.version
+      version: doc.version,
+      yjsState: doc.yjsState
     });
   }
   replaySuggestionsToConnection(room, context);

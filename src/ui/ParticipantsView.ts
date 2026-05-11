@@ -408,6 +408,7 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
 
       if (this.roomState.isRoot()) {
         items.push(new ActionItem('Share current file', 'coderooms.shareCurrentFile', [], new vscode.ThemeIcon('cloud-upload')));
+        items.push(new ActionItem('Share entire workspace', 'coderooms.shareWorkspace', [], new vscode.ThemeIcon('folder-library')));
         items.push(new ActionItem('Stop sharing current file', 'coderooms.unshareCurrentFile', [], new vscode.ThemeIcon('close')));
       } else if (this.roomState.isCollaborator() && !this.roomState.isCollaboratorInDirectMode()) {
         const pending = this.documentSync.getPendingSuggestionCount();

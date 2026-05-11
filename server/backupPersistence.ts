@@ -8,7 +8,8 @@ export interface PersistedDocumentState {
   version: number;
   originalUri: string;
   fileName: string;
-  languageId: string;
+  languageId?: string;
+  yjsState?: string; // Base64 encoded snapshot
 }
 
 export interface PersistedRecoverableParticipantState {

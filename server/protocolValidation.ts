@@ -222,6 +222,14 @@ export function validateClientMessage(msg: unknown): msg is ClientToServerMessag
         && isNonEmptyBoundedString(m.userId, MAX_SIMPLE_ID_LENGTH)
         && isParticipantActivity(m.activity)
         && isSafeTimestamp(m.at);
+    case 'awarenessUpdate':
+      return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
+        && isNonEmptyBoundedString(m.docId, MAX_SIMPLE_ID_LENGTH)
+        && (m.update instanceof Uint8Array || Buffer.isBuffer(m.update));
+    case 'voiceSignal':
+      return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
+        && isNonEmptyBoundedString(m.targetUserId, MAX_SIMPLE_ID_LENGTH)
+        && m.signal !== undefined;
     case 'chatSend':
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.messageId, MAX_SIMPLE_ID_LENGTH)
