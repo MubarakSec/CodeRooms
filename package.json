@@ -48,6 +48,7 @@
         "onView:coderoomsParticipants",
         "onCommand:coderooms.reconnect",
         "onCommand:coderooms.focusChatInput",
+        "onCommand:coderooms.joinVoice",
         "onCommand:coderooms.generateInviteToken",
         "onView:coderoomsChatView"
     ],
@@ -201,6 +202,10 @@
             {
                 "command": "coderooms.focusChatInput",
                 "title": "CodeRooms: Focus Chat Input"
+            },
+            {
+                "command": "coderooms.joinVoice",
+                "title": "CodeRooms: Join Voice Channel"
             },
             {
                 "command": "coderooms.setActiveDocument",

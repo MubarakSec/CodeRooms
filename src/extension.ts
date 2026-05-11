@@ -1329,6 +1329,25 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('coderooms.showStatus', showStatus),
     vscode.commands.registerCommand('coderooms.reconnect', reconnect),
+    vscode.commands.registerCommand('coderooms.joinVoice', async () => {
+      const roomId = roomState.getRoomId();
+      if (!roomId) {
+        void vscode.window.showWarningMessage('Join a CodeRoom before starting voice chat.');
+        return;
+      }
+      
+      const serverUrl = vscode.workspace.getConfiguration('coderooms').get<string>('serverUrl') ?? DEFAULT_SERVER_URL;
+      const voiceUrl = serverUrl.replace('ws://', 'http://').replace('wss://', 'https://') + '/voice/' + roomId;
+      
+      const action = await vscode.window.showInformationMessage(
+        'Voice chat requires an external browser tab to access your microphone.',
+        'Open Voice Chat', 'Cancel'
+      );
+      
+      if (action === 'Open Voice Chat') {
+        void vscode.env.openExternal(vscode.Uri.parse(voiceUrl));
+      }
+    }),
     vscode.commands.registerCommand('coderooms.generateInviteToken', generateInviteToken),
     configWatcher
   );
