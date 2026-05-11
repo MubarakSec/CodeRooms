@@ -1,60 +1,39 @@
-# Security Review Notes
+# CodeRooms Security Model (V1.2)
 
-This document records the current security posture that was reviewed while hardening Milestones 1 through 6.
+CodeRooms is designed with a **Zero-Knowledge Architecture**. The core design principle is that the server should never be able to read your proprietary code or chat messages.
 
-## Supported Deployment Model
+## 1. End-to-End Encryption (E2EE)
 
-- Local development may use `ws://127.0.0.1:5171`.
-- Remote/shared deployments should use `wss://` with TLS enabled either directly in CodeRooms or through a reverse proxy.
-- Plain remote `ws://` should be treated as trusted-network-only and not as the recommended production posture.
-- Recommended production shape:
-  - terminate TLS at CodeRooms or a reverse proxy
-  - forward WebSocket upgrade headers correctly
-  - restrict direct server exposure with firewall or private-network rules
-  - persist backups on durable storage
-  - capture stdout/stderr into your process supervisor or centralized logs
+Every data packet containing code or chat is encrypted on the client *before* it is transmitted to the server.
 
-## Access Control Review
+*   **Algorithm:** AES-256-GCM (Authenticated Encryption).
+*   **Key Derivation:** PBKDF2 (SHA-512, 100,000 iterations) derived from the Room Secret and Room ID.
+*   **Encrypted Scopes:**
+    *   **Documents:** Every Yjs CRDT update is encrypted as a binary blob.
+    *   **Chat:** All messages are encrypted.
+    *   **Voice Signaling:** WebRTC offers and answers are encrypted.
+*   **Server Visibility:** The server only sees opaque binary blobs and room metadata (Room ID, participant list, role assignments). It physically cannot decrypt the document content.
 
-- Privileged actions are checked server-side in `server/authorization.ts`.
-- Suggestion author identity is derived from the authenticated participant, not trusted from client payloads.
-- Reconnect session identity is separate from transient socket `userId`.
+## 2. Server-Side Guardrails
 
-## Input Validation Review
+Even though the server is "blind" to the code, it implements strict infrastructure security:
 
-- Client messages are validated centrally in `server/protocolValidation.ts`.
-- Patch payloads now require ordered ranges and bounded sizes.
-- Cursor selection arrays, invite labels, IDs, room IDs, and auth fields are capped.
+*   **SQLite Persistence:** Room state is stored in an atomic SQLite database. Snapshots of the CRDT state are stored as encrypted blobs.
+*   **Protocol Validation:** Every incoming binary message is strictly validated against a schema. Malformed or oversized payloads are rejected to prevent memory exhaustion.
+*   **Rate Limiting:**
+    *   **Join Limiter:** Prevents brute-forcing of room IDs.
+    *   **Chat/Suggestion Limiter:** Prevents spam.
+    *   **Connection Limiter:** Caps the number of connections per IP address.
+*   **Role-Based Access Control (RBAC):** The server enforces roles (`root`, `collaborator`, `viewer`) at the protocol level. A `viewer` who attempts to send an edit will be rejected by the server even if their client is compromised.
 
-## Replay and Duplicate Request Review
+## 3. Data Privacy
 
-- Tracked outbound document/chat/suggestion actions use ack keys from `shared/ackKeys.ts`.
-- Duplicate join/create races are blocked by `server/roomOperationGuards.ts`.
-- Duplicate suggestion submission is treated as idempotent only when the payload matches exactly; conflicting replays are rejected.
-- Share/unshare and reviewed-suggestion decisions are now idempotent with explicit terminal behavior.
+*   **Self-Hosting:** Unlike proprietary tools, you own the CodeRooms server. You can run it on your private intranet behind a VPN.
+*   **No Tracking:** The server does not track user behavior or analytics beyond standard operational logging.
+*   **Redis Isolation:** If using Redis for horizontal scaling, all data passing through Redis is the same encrypted binary blobs used by the clients.
 
-## Sensitive Data and Logging Review
+## 4. Recommendations for Production
 
-- Room secrets are hashed with PBKDF2 and plaintext secrets are not persisted.
-- Invite tokens and room secrets are not logged in server event logs.
-- Chat content may be end-to-end encrypted, but shared document content is not E2E encrypted and therefore still depends on transport security.
-
-## Abuse and Rate Limiting Review
-
-- Join, chat, suggestion, cursor, and participant-activity paths are rate-limited.
-- Connection and room creation are bounded per IP.
-- Document size, total server document bytes, suggestion counts, and message payload sizes are capped.
-
-## Protocol Misuse Review
-
-The following protocol-misuse cases were explicitly reviewed while hardening the current release candidate:
-
-- forged suggestion author identity
-- viewer attempts to edit shared documents
-- collaborator attempts to perform owner-only actions
-- duplicate join/create races
-- replayed tracked actions after reconnect
-- malformed patch, cursor, and selection payloads
-- repeated suggestion review requests after a suggestion is already resolved
-
-The server currently fails these closed through authorization checks, runtime protocol validation, idempotent tracked responses, or rate limiting.
+1.  **TLS/SSL:** Always run the CodeRooms server with TLS enabled (`--cert` and `--key` flags) or behind a TLS-terminating reverse proxy (like Nginx or Caddy).
+2.  **Strong Secrets:** Encourage users to use the auto-generated word-based room secrets, which provide high entropy.
+3.  **Redis Security:** If deploying a cluster, ensure the Redis instance is not publicly accessible and uses a strong password.

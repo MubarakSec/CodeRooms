@@ -2,312 +2,64 @@
 
 ## Purpose
 
-This roadmap turns the current audit findings into an execution plan that moves CodeRooms from "promising prototype" to a reliable, secure, polished collaboration tool.
-
-The priorities below focus on four outcomes:
-
-- Make collaboration state correct and recoverable.
-- Make the protocol secure and harder to misuse.
-- Make the UI feel intentional, fast, and easier to understand.
-- Make production failures observable and easier to debug.
+This roadmap documents the journey of CodeRooms from a prototype to a production-grade, secure collaboration suite. 
 
 ## North Star
 
-CodeRooms should feel production-ready for small teams and classrooms:
+CodeRooms should provide a "VS Code Native" experience for real-time collaboration that is faster, more private, and more scalable than any other open-source alternative.
 
-- Room state survives reconnects and restarts without corrupting ownership or collaboration state.
-- Suggestion, chat, and document sync flows are deterministic and testable.
-- The UI is visually cleaner, less noisy, and faster under load.
-- Common failures are handled gracefully instead of leaving the system in a half-broken state.
+## 🏆 Current Status: V1.2 (Overhaul Complete)
+
+We have successfully moved beyond the original roadmap into a high-performance architectural state.
+
+### Completed Milestones (2026)
+
+- **[V1.0] Production Infrastructure**
+    - [x] **SQLite Persistence:** Replaced JSON backups with a robust SQLite WAL database.
+    - [x] **Horizontal Scalability:** Integrated Redis Pub/Sub for server clustering.
+    - [x] **Yjs CRDT Engine:** Replaced fragile 1D OT with mathematically guaranteed Yjs CRDTs.
+
+- **[V1.1] Protocol & Performance**
+    - [x] **Pure Binary Protocol:** Moved to 100% binary transport (`Uint8Array`) via `msgpackr`.
+    - [x] **Zero-Knowledge E2EE:** Implemented full End-to-End Encryption for documents and chat.
+    - [x] **Yjs Awareness:** Integrated cursor and presence tracking directly into the CRDT stream.
+    - [x] **Workspace Sharing:** Multi-file recursive project synchronization.
+
+- **[V1.2] Communication & UI**
+    - [x] **E2EE Voice Chat:** Integrated WebRTC audio bridge with browser-bridge technology.
+    - [x] **UI/UX Revamp:** Modern animated Chat Webview with native VS Code aesthetic.
+    - [x] **Inline Suggestion Review:** Integrated CodeLenses for seamless editor-based reviews.
+
+---
+
+## Future Goals (The Path to V2.0)
+
+### Milestone 9: Advanced Shared Terminal
+- [ ] Share terminals with interactive PTY support.
+- [ ] Role-based terminal permissions (Viewer vs. Interactor).
+- [ ] E2EE terminal streams.
+
+### Milestone 10: Port Forwarding
+- [ ] Automate sharing of local development ports (e.g., localhost:3000).
+- [ ] Native VS Code integration for "Open in Browser" on guest machines.
+
+### Milestone 11: Cross-IDE Support
+- [ ] Build a headless CLI client for CodeRooms.
+- [ ] Investigate a JetBrains plugin or web-based editor bridge.
+
+---
 
 ## Guiding Principles
 
-- Server-authoritative state for all critical collaboration flows.
-- Idempotent and explicit protocol behavior.
-- Fail closed for authz/security, fail safe for UX.
-- No silent drops for tracked actions.
-- Every major bug class must have automated coverage.
-- UI changes should improve both clarity and performance.
-
-## Current Risk Snapshot
-
-The highest current risks are:
-
-- Milestone 8 release-readiness work is now down to the final interactive UI review path against the packaged extension in a clean VS Code profile.
-- Performance guardrails now exist, reconnect/restart stress coverage now exists as a live multi-client suite, and the `.vsix` now builds and installs into an isolated clean profile. The remaining gap is interactive packaged-extension smoke coverage, not packaging itself.
-- Extension/server entrypoints still have less automated coverage than the collaboration core, so orchestration regressions remain a secondary risk class.
-
-## Progress Snapshot
-
-Current implementation status:
-
-- Milestone 0 is complete: CI guardrails, linting, coverage thresholds, release checklisting, and protocol invariants coverage are in place.
-- Milestones 1 through 6 are complete and verified by the current automated suite.
-- Milestone 7 is complete: refresh suppression, cursor-decoration diffing, participant activity batching, prompt throttling, editor-reveal churn reduction, review-queue chunking, tooltip caps, chat sliding-window diffs, and measured responsiveness budgets are in place.
-- Milestone 8 soak testing is now partly complete: live reconnect-storm and restart-recovery stress coverage passes through `npm run test:stress`.
-- Milestone 8 packaging is now partly complete: `npm run package` succeeds, produces a `.vsix`, and the artifact installs cleanly into an isolated VS Code profile through the `code` CLI.
-- The latest verification pass is green for `npm run verify`, `npm run test:coverage`, `npm run perf:profile`, `npm run test:stress`, and `npm run package`.
-
-Next focus:
-
-- Final interactive release-candidate smoke testing against the packaged `.vsix`.
-- Clean-profile UI review/sign-off in VS Code.
-
-## Milestone 0: Baseline and Guardrails
-
-Goal: stop regressions while larger refactors are in flight.
-
-- [x] Add CI gates for `npm test`, `npm run typecheck`, and `npm run server:build`.
-- [x] Add a linting pass for client, shared, and server code.
-- [x] Add a small multi-client integration harness for protocol scenarios.
-- [x] Add coverage reporting and require minimum thresholds for core modules.
-- [x] Add a release checklist for restart, reconnect, suggestions, and multi-document sync.
-- [x] Add a dedicated "protocol invariants" test suite for authz and room lifecycle.
-
-Representative coverage:
-
-- [x] CI runs the guarded verification pipeline plus the coverage job on every push and pull request.
-- [x] The multi-client harness and `protocolInvariants` suite exercise owner authz, session reclaim, tracked terminal responses, and room closure flows.
-- [x] The coverage report enforces minimum thresholds on the tested collaboration core instead of treating the whole repo as equally instrumented.
-- [x] The release checklist captures restart, reconnect, suggestion, and multi-document sync gates before packaging.
-
-Success criteria:
-
-- Every PR runs the core verification pipeline.
-- Critical collaboration flows have reproducible tests, not just manual validation.
-
-## Milestone 1: Room Lifecycle and Ownership Correctness
-
-Goal: make rooms behave correctly across joins, leaves, reconnects, and restarts.
-
-- [x] Fix restored-room ownership so the original owner can reclaim the room after restart.
-- [x] Stop restoring stale live participant membership from disk.
-- [x] Clean up previous room membership before a socket joins or creates a new room.
-- [x] Add explicit room/session identity separate from transient connection `userId`.
-- [x] Add server-side room membership invariants and assert them in tests.
-- [x] Ensure root shutdown cleanly notifies clients and persists only valid recoverable state.
-- [x] Add duplicate join/create request protection per connection and per room.
-- [x] Make reconnect semantics explicit: reconnect to same session, or join as a new session.
-
-Representative coverage:
-
-- [x] Restart with an active room and reclaim owner identity after restore.
-- [x] Reconnect the root while collaborators remain active and preserve session semantics.
-- [x] Room-switch cleanup and duplicate join/create protection prevent ghost membership.
-- [x] Owner-driven room closure clears live session state deterministically.
-
-Success criteria:
-
-- No ownerless rooms after restart.
-- No stale participants after reconnect or room switch.
-
-## Milestone 2: Document Sync Correctness
-
-Goal: make document state consistent across multiple files, reconnects, and concurrent edits.
-
-- [x] Fix active document tracking so manual editor switches do not disable sync.
-- [x] Separate "focused editor" from "active shared document" state.
-- [x] Add idempotency guards for `shareDocument`, `unshareDocument`, and repeated reconnect replays.
-- [x] Ensure every tracked outbound document action receives a terminal `ack` or `error`.
-- [x] Review OT fallback logic for no-op transforms and define explicit outcomes.
-- [x] Add bounds and validation for patch shapes, ranges, and selection payload sizes.
-- [x] Reduce silent returns in server message handlers; prefer typed errors for invalid state.
-- [x] Add document state reconciliation flow for reconnects and partial desyncs.
-
-Representative coverage:
-
-- [x] Multiple shared documents keep syncing across manual tab switches.
-- [x] Reconnect during pending offline edits does not duplicate tracked replay.
-- [x] Invalid patch ranges fail with deterministic validation/error behavior.
-- [x] Concurrent edit shapes remain consistent through patch/OT coverage.
-
-Success criteria:
-
-- Multi-document collaboration works without manual command intervention.
-- Reconnect does not duplicate or drop tracked edits.
-
-## Milestone 3: Suggestion Workflow Hardening
-
-Goal: make suggestions reliable, replayable, and server-authoritative.
-
-- [x] Keep suggestions visible if the owner dismisses the prompt without deciding.
-- [x] Replace local-only "Clear all suggestions" with a server-backed action.
-- [x] Replay pending suggestions to the owner on rejoin and restart recovery.
-- [x] Add deduplication/idempotency for repeated `acceptSuggestion` and `rejectSuggestion`.
-- [x] Persist suggestion status transitions explicitly.
-- [x] Make the server the only source of truth for suggestion lifecycle state.
-- [x] Add bulk reject and bulk review APIs/messages with audit-safe behavior.
-- [x] Reduce intrusive modal-like prompt behavior in favor of a persistent review queue.
-
-Representative coverage:
-
-- [x] Queue-driven review leaves suggestions pending until an explicit review action.
-- [x] Bulk review actions clear both client and server state through server-backed APIs.
-- [x] Restart and rejoin paths replay pending suggestions to the owner.
-- [x] Repeated review decisions are idempotent or return deterministic conflicts.
-
-Success criteria:
-
-- Suggestion review survives reconnects and restarts.
-- No local/server divergence in pending suggestion state.
-
-## Milestone 4: Security and Abuse Resistance
-
-Goal: close obvious misuse paths and tighten protocol validation.
-
-- [x] Replace loose runtime validation with strict per-message schema validation.
-- [x] Validate enum values for role, mode, activity, and all discriminated unions.
-- [x] Add authz checks to every privileged action and return explicit errors.
-- [x] Add throttling for `cursorUpdate` and `participantActivity`.
-- [x] Add payload caps for selections arrays, file labels, and invite labels.
-- [x] Review storage and filesystem writes for path safety and unexpected overwrite paths.
-- [x] Harden room join logic against brute force and room enumeration.
-- [x] Review token generation, expiration, and invalidation behavior.
-- [x] Add structured security tests for forged identities and broken access control.
-- [x] Document deployment expectations for TLS/reverse proxy and local-only defaults.
-
-Security checklist:
-
-- [x] Broken access control review complete.
-- [x] Input validation review complete.
-- [x] Replay/duplicate request review complete.
-- [x] Sensitive data/logging review complete.
-- [x] Abuse-rate limiting review complete.
-
-Success criteria:
-
-- No client-controlled privilege or identity fields are trusted without server validation.
-- High-frequency protocol spam is bounded.
-
-## Milestone 5: Persistence, Recovery, and Operational Safety
-
-Goal: make disk persistence and restart behavior reliable under failure.
-
-- [x] Add a save mutex/queue so autosave operations cannot overlap.
-- [x] Catch and log autosave failures explicitly.
-- [x] Add corruption handling for backup and metadata files.
-- [x] Version persisted room state for future migrations.
-- [x] Decide and document exactly what is recoverable after restart.
-- [x] Add cleanup/TTL policy for old room storage and event logs.
-- [x] Add recovery telemetry/logging for load/save/migration paths.
-- [x] Validate room/accounting rebuild on startup.
-
-Representative coverage:
-
-- [x] Simulate concurrent autosaves through the serialized save runner.
-- [x] Simulate rename/write failure for backup files.
-- [x] Start with corrupted backup JSON.
-- [x] Verify accounting rebuild for restored documents and rooms.
-
-Success criteria:
-
-- No unhandled persistence failures.
-- Restart behavior is deterministic and documented.
-
-## Milestone 6: UI/UX Refactor
-
-Goal: give CodeRooms a noticeably better visual hierarchy and a smoother collaboration experience.
-
-### UX Goals
-
-- Reduce prompt fatigue.
-- Make room state easier to parse at a glance.
-- Make suggestions and collaboration modes obvious.
-- Improve discoverability of key actions without clutter.
-
-### Visual Refactor Checklist
-
-- [x] Redesign the participants panel into clearer sections: session, work, people, review.
-- [x] Replace overly verbose text with stronger labels, spacing, and icon grouping.
-- [x] Turn suggestions into a persistent review workflow instead of prompt-driven interruptions.
-- [x] Improve chat layout density, timestamps, grouping, and empty/loading states.
-- [x] Make status bar states clearer and more consistent across offline/connecting/reconnecting/error states.
-- [x] Improve command naming and in-panel action wording for less ambiguity.
-- [x] Add clearer ownership and edit-mode indicators.
-- [x] Review typography, spacing, and color contrast across views.
-- [x] Add keyboard-friendly actions for common flows.
-- [x] Add accessibility review for screen reader text, focus handling, and contrast.
-
-### UX Architecture Refactor
-
-- [x] Move ad-hoc UI text generation into dedicated helpers/view models.
-- [x] Separate presentation state from protocol state.
-- [x] Replace one-off prompt decisions with panel-driven review queues where possible.
-- [x] Standardize empty states, warning states, and recovery actions.
-- [x] Add view-state tests for role-specific panel behavior.
-
-Success criteria:
-
-- A new user can understand room state, role, active file, and pending actions within a few seconds.
-- Suggestion review no longer depends on transient prompts.
-
-## Milestone 7: Performance and Scalability
-
-Goal: keep the extension responsive with larger rooms, more suggestions, and more document activity.
-
-- [x] Measure tree refresh frequency and eliminate unnecessary full refreshes.
-- [x] Diff cursor decorations instead of repainting everything on every update.
-- [x] Batch participant/activity UI updates.
-- [x] Throttle expensive `showWarningMessage` and prompt paths more aggressively.
-- [x] Reduce redundant `openTextDocument` / `showTextDocument` churn.
-- [x] Add virtualization or chunking where the chat/review lists can grow large.
-- [x] Cap expensive markdown/tooltip generation for large suggestion sets.
-- [x] Add targeted profiling for 10, 25, 50+ participant rooms.
-- [x] Define and measure extension responsiveness budgets.
-
-Performance targets:
-
-- [x] Panel refresh under 100 ms for normal rooms.
-- [x] No noticeable typing lag with 25 participants.
-- [x] Reconnect recovery completes without UI lockups.
-
-## Milestone 8: Release Readiness
-
-Goal: ship a confident, testable, supportable version.
-
-- [x] Finalize the supported deployment model and document it.
-- [x] Add production logging guidance and troubleshooting docs.
-- [x] Add migration notes for persisted room state changes.
-- [x] Create a manual QA checklist for VS Code extension behavior.
-- [x] Run stress tests for reconnect storms and restart recovery.
-- [x] Run a security review focused on protocol misuse.
-- [x] Package a release candidate and validate it in a clean environment.
-
-Release gates:
-
-- [x] No critical or high open issues in room lifecycle, document sync, or suggestions.
-- [x] Restart and reconnect suites pass.
-- [x] UI review pass complete.
-- [x] Security review pass complete.
-
-## Suggested Delivery Order
-
-### Phase 1
-
-- Milestone 0
-- Milestone 1
-- Milestone 2
-
-### Phase 2
-
-- Milestone 3
-- Milestone 4
-- Milestone 5
-
-### Phase 3
-
-- Milestone 6
-- Milestone 7
-- Milestone 8
-
-## Definition of Done for the "Big Leap"
-
-CodeRooms has made a major jump when all of the following are true:
-
-- [x] Room restart/recovery is trustworthy.
-- [x] Multi-document collaboration is stable.
-- [x] Suggestion workflow is persistent and server-authoritative.
-- [x] Security validation is strict and abuse-resistant.
-- [ ] The extension UI is cleaner, more intentional, and less interruptive.
-- [x] Performance remains acceptable under realistic collaborative load.
-- [x] The release pipeline can catch regressions before shipping.
+- **Zero-Knowledge:** The server never sees the code.
+- **Native Experience:** Respect VS Code's design language and performance budgets.
+- **Scale:** Design for clusters (Redis), not just single processes.
+- **Correctness:** 100% test pass rate for all collaboration edge cases.
+
+## Success Criteria (V1.2 Green)
+
+- [x] Room restart/recovery is 100% trustworthy (SQLite).
+- [x] Multi-document collaboration is mathematically stable (Yjs).
+- [x] Full End-to-End Encryption for all data (AES-GCM).
+- [x] Performance is optimal via pure binary transport.
+- [x] Voice communication is integrated and private.

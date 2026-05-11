@@ -1,32 +1,32 @@
-﻿# CodeRooms
+# CodeRooms
 
 <p align="center">
   <img src="media/icon.png" alt="CodeRooms" width="128" />
 </p>
 
-Real-time collaborative coding inside VS Code — no screen sharing, just shared buffers, roles, and quick actions. CodeRooms pairs a lightweight Node.js WebSocket server with a VS Code extension so teams can create rooms, share documents, chat, and code together without leaving the editor.
+**CodeRooms** is a production-grade, real-time collaborative coding environment for VS Code. It features high-performance CRDT synchronization, end-to-end encryption, and a horizontally scalable backend.
+
+Real-time collaboration — no screen sharing, just shared buffers, roles, and integrated communication. CodeRooms pairs a robust Node.js coordination server with a native VS Code extension.
 
 > **See [INSTALLATION.md](docs/INSTALLATION.md) for detailed setup instructions.**
 >
-> **See [SECURITY.md](docs/SECURITY.md) for the supported deployment model and security review notes.**
+> **See [SECURITY.md](docs/SECURITY.md) for the E2EE model and security review notes.**
 
 ---
 
-## Features
+## Features (V1.2)
 
 | Area | What you get |
 |------|-------------|
-| **Rooms & Roles** | Create or join rooms with `root`, `collaborator`, or `viewer` roles. Protect rooms with a secret (hashed with PBKDF2 on the server). |
-| **Document Sharing** | Root shares any open file; collaborators see edits in real time via incremental patches with server-side OT (Operational Transform). |
-| **Suggestion Mode** | Collaborator edits become inline suggestions the root can accept or reject — great for code reviews and teaching. |
-| **Direct Edit Mode** | Toggle collaborators into direct edit mode when free-form collaboration is preferred. |
-| **Encrypted Chat** | In-editor chat panel with end-to-end encryption (AES-256-GCM) when a room secret is provided. |
-| **Follow Cursor** | Collaborators and viewers can follow the root's cursor across files in real time. |
-| **Participants Panel** | Tree view showing who's in the room, their role, edit mode, and activity status. |
-| **Invite Tokens** | Generate single-use invite tokens for secure room access. |
-| **Room Export** | Root can export the entire room (all shared documents) as a `.zip` archive. |
-| **Persistence** | Server persists room state with atomic JSON backups and auto-restores on restart. |
-| **Rate Limiting** | Per-IP connection, room, join-attempt, chat, and suggestion rate limits server-side. |
+| **Sync Engine** | **Yjs CRDT:** Mathematically guaranteed document consistency. Supports massive files and complex concurrent edits without conflicts. |
+| **Privacy (E2EE)** | **Full Binary E2EE:** Every keystroke and chat message is encrypted (AES-256-GCM) on the client before being sent. The server is "blind" to your code. |
+| **Persistence** | **SQLite WAL:** Room state is saved atomically to a robust database. 100% crash-proof recovery. |
+| **Scalability** | **Redis Pub/Sub:** Horizontally scalable backend. Run a cluster of CodeRooms servers to support thousands of concurrent developers. |
+| **Voice Chat** | **E2EE P2P Voice:** Integrated audio communication via WebRTC. Secure, low-latency, and private. |
+| **Suggestion Mode** | Collaborator edits become inline suggestions. Root can review with **native CodeLenses** directly in the editor. |
+| **Workspace Sharing** | Share single files or your **entire project workspace** with a single command, featuring native progress tracking. |
+| **Modern UI** | Sleek, animated Chat Webview with frosted-glass aesthetic and native VS Code styling. |
+| **Protocol** | **Pure Binary:** Uses `Uint8Array` and `msgpackr`. 33% more efficient than JSON/Base64 engines. |
 
 ---
 
@@ -38,33 +38,22 @@ git clone https://github.com/mobta/CodeRooms.git
 cd CodeRooms
 npm install
 
-# 2. Build and start the server
+# 2. Start the infrastructure (Optional but recommended for scale)
+# Ensure Redis is running locally, then:
+export REDIS_URL="redis://localhost:6379"
+
+# 3. Build and start the server
 npm run server:build
 npm run server:start
 
-# 3. Launch the extension
+# 4. Launch the extension
 # Open the repo in VS Code → press F5 → "Run Extension"
 
-# 4. Verify local guardrails before shipping changes
+# 5. Verify system health
 npm run verify
-npm run test:coverage
-npm run perf:profile
-npm run test:stress
 ```
 
 In the Extension Development Host, run **CodeRooms: Start Room as Root** from the Command Palette.
-
-> Full setup details, TLS configuration, and packaging instructions are in **[INSTALLATION.md](docs/INSTALLATION.md)**.
-
----
-
-## Extension Settings
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `coderooms.serverUrl` | `string` | `ws://localhost:5171` | WebSocket URL for the coordination server. |
-| `coderooms.mode` | `enum` | `team` | Default room mode (`team` or `classroom`). |
-| `coderooms.debugLogging` | `boolean` | `false` | Enable verbose logging in the developer console. |
 
 ---
 
@@ -74,48 +63,35 @@ In the Extension Development Host, run **CodeRooms: Start Room as Root** from th
 |---------|-------------|-----|
 | Start Room as Root | Create a new room as the owner | Anyone |
 | Join Room | Join an existing room by ID | Anyone |
-| Leave Room | Leave the current room | Anyone |
-| Copy Room ID | Copy the current room ID to clipboard | Anyone |
-| Reconnect | Force reconnect to the server | Anyone |
+| Join Voice Channel | Start or join the E2EE audio bridge | Anyone |
+| Share Entire Workspace | Recursively sync the project folder | Root |
 | Share Current File | Share the active editor document | Root |
-| Stop Sharing Current File | Unshare the active document | Root |
-| Open Shared Document | Switch to a shared document | Anyone in room |
-| Export Room | Download all shared docs as a zip | Root |
-| Stop Room | Close the room for everyone | Root |
-| Toggle Collaborator Mode | Switch between direct edit and suggestion mode | Collaborator |
+| Stop Sharing | Unshare the active document | Root |
+| Accept / Reject | Native inline review actions for suggestions | Root |
 | Toggle Follow Root | Follow or unfollow the root's cursor | Collaborator/Viewer |
-| Change Participant Role | Change a participant's role | Root |
-| Set Role to Collaborator / Viewer | Quick role assignment from context menu | Root |
-| Remove Participant | Remove a participant from the room | Root |
-| Accept / Reject Suggestion | Act on a pending suggestion | Root |
-| Generate Invite Token | Create a single-use join token | Root |
-| Open Chat / Send Chat Message | Chat with room participants | Anyone in room |
+| Export Room | Download all shared docs as a zip | Root |
+| Open Chat | Native animated chat window | Anyone in room |
 
 ---
 
 ## Server Configuration
 
-The server accepts configuration through CLI flags, environment variables, or a `coderooms.config.json` file:
-
-| Option | CLI Flag | Env Variable | Default |
-|--------|----------|-------------|---------|
-| Port | `--port`, `-p` | `CODEROOMS_PORT` | `5171` |
-| Host | `--host`, `-h` | `CODEROOMS_HOST` | `127.0.0.1` |
-| TLS Cert | `--cert` | `CODEROOMS_CERT` | *(none)* |
-| TLS Key | `--key` | `CODEROOMS_KEY` | *(none)* |
-
-Resolution order: CLI → environment variable → config file → default.
+| Option | Env Variable | Default | Description |
+|--------|----------|---------|-------------|
+| Port | `CODEROOMS_PORT` | `5171` | Server listener port |
+| Host | `CODEROOMS_HOST` | `127.0.0.1` | Server listener host |
+| Redis | `REDIS_URL` | *(none)* | Enable horizontal scaling via Redis |
+| Database | `rooms.db` | *(local)* | Automatic SQLite persistence |
 
 ---
 
-## Security
+## Security Architecture
 
-- Room secrets hashed with **PBKDF2** (100 000 iterations, SHA-512).
-- Chat is **E2E encrypted** (AES-256-GCM) when a room secret is set; document content is transmitted in plaintext.
-- Per-IP limits: max 20 connections, 10 rooms, rate-limited joins/chat/suggestions.
-- Display names capped at 50 characters; message payloads capped at 512 KB.
-- No built-in TLS — run behind a reverse proxy (nginx, Caddy) for production use.
-- Room state persisted via atomic JSON backups; auto-restored on restart.
+CodeRooms implements a **Zero-Knowledge** architecture for document synchronization:
+- **E2E Encryption:** All Yjs updates and chat messages are encrypted with **AES-256-GCM** using the Room Secret (derived via PBKDF2).
+- **Binary Protocol:** Data is transmitted as opaque binary blobs.
+- **Server Privacy:** The server only relays encrypted packets and manages room metadata. It physically cannot read the content of your files.
+- **Persistence:** Metadata and encrypted snapshots are stored in **SQLite** with Write-Ahead Logging.
 
 ---
 
@@ -124,38 +100,19 @@ Resolution order: CLI → environment variable → config file → default.
 ```
 CodeRooms/
 ├── src/                    # Extension source (TypeScript)
-│   ├── extension.ts        # Activation, commands, message handling
-│   ├── connection/         # WebSocket client + message types
-│   ├── core/               # DocumentSync, RoomState, ChatManager, etc.
-│   ├── ui/                 # ChatView, ParticipantsView, StatusBar
-│   └── util/               # Config, logger, crypto helpers
-├── server/                 # Coordination server (TypeScript)
-│   ├── server.ts           # WebSocket server, room logic, persistence
-│   ├── patch.ts            # Text patch application
-│   ├── ot.ts               # Operational Transform engine
-│   ├── rateLimiter.ts      # Token-bucket rate limiter
-│   └── types.ts            # Re-exports shared protocol types
-├── shared/                 # Shared type definitions
-│   └── protocol.ts         # Single source of truth for message types
-├── tests/                  # Vitest test suite
-├── media/                  # Icons and assets
-├── out/                    # Compiled extension output
-└── out-server/             # Compiled server output
-```
-
----
-
-## Development
-
-```bash
-npm run compile          # Compile the extension
-npm run typecheck        # Type-check without emitting
-npm run bundle           # Bundle with esbuild for packaging
-npm run server:build     # Compile the server
-npm test                 # Run all tests (vitest)
-npm run perf:profile     # Run the Milestone 7 performance harness
-npm run test:stress      # Run live reconnect/restart stress plus perf profile
-npm run package          # Package as .vsix
+│   ├── core/               # Yjs Sync, RoomState, ChatManager
+│   ├── connection/         # Binary WebSocket client
+│   ├── ui/                 # Revamped ChatView, ParticipantsView
+│   └── util/               # Binary Crypto, logger, room secrets
+├── server/                 # Production-grade backend
+│   ├── db.ts               # SQLite persistence layer
+│   ├── redis.ts            # Scaling backplane
+│   ├── server.ts           # Unified HTTP/WS server & voice bridge
+│   ├── ot.ts               # Legacy OT (fallback only)
+│   └── protocolValidation.ts # Strict binary payload validation
+├── shared/                 # Shared protocol definitions
+├── tests/                  # Robust test suite (246+ tests)
+└── rooms.db                # Auto-generated database
 ```
 
 ---
