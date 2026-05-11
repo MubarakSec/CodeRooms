@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import { ChatManager } from '../core/ChatManager';
+import { RoomState } from '../core/RoomState';
 import { buildChatRenderPlan, chunkChatMessages } from './chatRenderPlan';
 
 export class ChatView implements vscode.WebviewViewProvider {
@@ -8,7 +9,7 @@ export class ChatView implements vscode.WebviewViewProvider {
   private lastRenderedMessageIds: string[] = [];
   private postTimer?: NodeJS.Timeout;
 
-  constructor(private readonly chatManager: ChatManager) {
+  constructor(private readonly chatManager: ChatManager, private readonly roomState: RoomState) {
     this.chatManager.onDidChange(() => this.schedulePostMessages());
   }
 
@@ -61,10 +62,12 @@ export class ChatView implements vscode.WebviewViewProvider {
     }
 
     const chunks = chunkChatMessages(plan.messages, 50);
+    const myUserId = this.roomState.getUserId();
     if (chunks.length === 0) {
       this.view.webview.postMessage({
         type: 'messages',
         payload: [],
+        myUserId,
         append: plan.append,
         dropHeadCount: plan.dropHeadCount
       });
@@ -75,6 +78,7 @@ export class ChatView implements vscode.WebviewViewProvider {
       this.view.webview.postMessage({
         type: 'messages',
         payload: chunk,
+        myUserId,
         append: plan.append || index > 0,
         dropHeadCount: index === 0 ? plan.dropHeadCount : 0
       });
@@ -93,272 +97,217 @@ export class ChatView implements vscode.WebviewViewProvider {
       :root {
         color-scheme: light dark;
         --bg: var(--vscode-sideBar-background);
-        --panel: rgba(255,255,255,0.02);
-        --border: var(--vscode-panel-border, rgba(128,128,128,0.24));
-        --border-strong: var(--vscode-contrastBorder, var(--border));
-        --bubble: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-button-background) 8%);
-        --bubble-accent: color-mix(in srgb, var(--vscode-button-background) 35%, var(--vscode-editor-background) 65%);
-        --bubble-self: color-mix(in srgb, var(--vscode-button-background) 18%, var(--vscode-editor-background) 82%);
-        --system-bg: rgba(128,128,128,0.08);
-        --system-border: rgba(128,128,128,0.15);
-        --text-dim: rgba(128,128,128,0.7);
-        --avatar-root: var(--vscode-charts-yellow, #c69300);
-        --avatar-collab: var(--vscode-charts-blue, #2f81f7);
-        --avatar-viewer: var(--vscode-descriptionForeground, #888);
-        --hover-bg: rgba(128,128,128,0.06);
+        --border: var(--vscode-panel-border, rgba(128,128,128,0.2));
+        --text-main: var(--vscode-editor-foreground);
+        --text-dim: var(--vscode-descriptionForeground, rgba(128,128,128,0.7));
+        
+        --bubble-other: var(--vscode-editorWidget-background);
+        --bubble-other-border: var(--vscode-editorWidget-border, transparent);
+        
+        --bubble-self: var(--vscode-button-background);
+        --bubble-self-text: var(--vscode-button-foreground);
+        
+        --sys-bg: rgba(128,128,128,0.1);
         --link-color: var(--vscode-textLink-foreground);
+        --accent: var(--vscode-focusBorder);
       }
       * { box-sizing: border-box; }
-      html, body { height: 100%; }
+      html, body { height: 100%; margin: 0; padding: 0; }
       body {
-        margin: 0; padding: 0;
         background: var(--bg);
-        color: var(--vscode-editor-foreground);
-        font-family: var(--vscode-font-family);
+        color: var(--text-main);
+        font-family: var(--vscode-font-family), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         font-size: 13px;
         display: flex;
         flex-direction: column;
+        overflow: hidden;
       }
 
-      .wrapper { display: flex; flex-direction: column; height: 100%; }
+      .wrapper { display: flex; flex-direction: column; height: 100%; position: relative; }
 
+      /* Sticky Header */
       .chat-header {
-        padding: 10px 12px 8px;
+        padding: 12px 14px;
+        background: color-mix(in srgb, var(--bg) 85%, transparent);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
         border-bottom: 1px solid var(--border);
-        background: linear-gradient(180deg, rgba(128,128,128,0.06), rgba(128,128,128,0.01));
+        z-index: 10;
+        flex-shrink: 0;
       }
-      .chat-header.compact { padding-bottom: 10px; }
-      .chat-title {
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.2px;
-        text-transform: uppercase;
-      }
-      .chat-hint-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        margin-top: 4px;
-      }
-      .chat-hint {
-        font-size: 11px;
-        color: var(--text-dim);
-      }
+      .chat-title { font-weight: 600; font-size: 12px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--text-dim); }
+      .chat-hint-row { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+      .chat-hint { font-size: 11px; color: var(--text-dim); }
       .chat-hint-row.hidden { display: none; }
       .chat-hint-dismiss {
-        border: 1px solid transparent;
-        border-radius: 6px;
-        background: transparent;
-        color: var(--text-dim);
-        cursor: pointer;
-        font: inherit;
-        font-size: 11px;
-        line-height: 1;
-        padding: 2px 6px;
+        background: none; border: none; padding: 2px 4px; cursor: pointer;
+        color: var(--text-dim); font-size: 11px; border-radius: 4px;
       }
-      .chat-hint-dismiss:hover {
-        background: var(--hover-bg);
-        color: var(--vscode-editor-foreground);
-      }
-      .chat-hint-dismiss:focus-visible {
-        outline: 1px solid var(--vscode-focusBorder);
-        outline-offset: 2px;
-      }
+      .chat-hint-dismiss:hover { background: rgba(128,128,128,0.2); color: var(--text-main); }
 
-      /* Empty state */
+      /* Empty State */
       .empty-state {
-        flex: 1; display: flex; flex-direction: column;
-        align-items: center; justify-content: center; gap: 8px;
-        opacity: 0.5; padding: 24px; text-align: center;
+        position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        padding: 30px; text-align: center; pointer-events: none;
       }
-      .empty-state .icon { font-size: 32px; }
-      .empty-state .title { font-size: 14px; font-weight: 500; }
-      .empty-state .subtitle { font-size: 12px; }
+      .empty-icon { font-size: 48px; margin-bottom: 16px; opacity: 0.2; filter: grayscale(1); }
+      .empty-title { font-weight: 600; font-size: 14px; margin-bottom: 8px; opacity: 0.8; }
+      .empty-sub { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
 
-      /* Messages */
+      /* Messages Area */
       .messages {
-        flex: 1; padding: 8px 10px; overflow-y: auto;
-      }
-      .message-list {
-        list-style: none;
-        margin: 0;
-        padding: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
+        flex: 1; padding: 16px 14px; overflow-y: auto;
+        display: flex; flex-direction: column; gap: 12px;
       }
       .messages::-webkit-scrollbar { width: 6px; }
       .messages::-webkit-scrollbar-track { background: transparent; }
-      .messages::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.3); border-radius: 3px; }
+      .messages::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.2); border-radius: 10px; }
+      .messages::-webkit-scrollbar-thumb:hover { background: rgba(128,128,128,0.4); }
 
-      /* Date divider */
+      /* Date Divider */
       .date-divider {
-        display: flex; align-items: center; gap: 8px;
-        margin: 12px 0 6px; font-size: 11px; color: var(--text-dim);
+        display: flex; align-items: center; justify-content: center;
+        margin: 16px 0 8px; font-size: 10px; font-weight: 600;
+        color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;
       }
       .date-divider::before, .date-divider::after {
-        content: ''; flex: 1; height: 1px;
-        background: var(--border);
+        content: ''; height: 1px; flex: 1; background: var(--border); margin: 0 12px; opacity: 0.5;
       }
 
-      /* System messages */
-      .system-row {
-        display: flex; align-items: center; gap: 6px;
-        padding: 4px 10px; margin: 2px 0;
-        border-radius: 6px;
-        background: var(--system-bg); border: 1px solid var(--system-border);
-        font-size: 12px; color: var(--text-dim);
-        font-style: italic;
-      }
-      .system-row .sys-icon { opacity: 0.6; font-size: 12px; }
-      .system-row .sys-time { margin-left: auto; font-size: 10px; opacity: 0.7; }
-
-      /* Chat rows */
+      /* Chat Row */
       .chat-row {
-        display: flex; gap: 8px; padding: 6px 4px;
-        border-radius: 8px; transition: background 0.1s;
-        border: 1px solid transparent;
+        display: flex; flex-direction: column;
+        max-width: 85%;
+        animation: slideUp 0.2s cubic-bezier(0.1, 0.8, 0.2, 1);
+        transform-origin: bottom center;
       }
-      .chat-row:hover { background: var(--hover-bg); border-color: var(--border-strong); }
+      @keyframes slideUp {
+        from { opacity: 0; transform: translateY(8px) scale(0.98); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+      }
 
-      .avatar {
-        width: 30px; height: 30px; border-radius: 50%;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 13px; font-weight: 600; flex-shrink: 0;
-        color: #fff; text-transform: uppercase;
-        margin-top: 2px;
-      }
-      .avatar.root { background: var(--avatar-root); }
-      .avatar.collaborator { background: var(--avatar-collab); }
-      .avatar.viewer { background: var(--avatar-viewer); }
+      .chat-row.other { align-self: flex-start; }
+      .chat-row.self { align-self: flex-end; }
 
-      .msg-body { flex: 1; min-width: 0; }
+      .msg-meta {
+        font-size: 11px; margin-bottom: 4px; color: var(--text-dim);
+        display: flex; align-items: center; gap: 6px;
+      }
+      .chat-row.other .msg-meta { margin-left: 4px; }
+      .chat-row.self .msg-meta { margin-right: 4px; flex-direction: row-reverse; }
 
-      .msg-header {
-        display: flex; align-items: baseline; gap: 6px;
-        margin-bottom: 2px;
+      .msg-name { font-weight: 600; color: var(--text-main); }
+      
+      .bubble {
+        padding: 8px 12px; font-size: 13px; line-height: 1.45;
+        word-break: break-word; position: relative;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
       }
-      .msg-name {
-        font-size: 13px; font-weight: 600;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      
+      .chat-row.other .bubble {
+        background: var(--bubble-other);
+        border: 1px solid var(--bubble-other-border);
+        border-radius: 12px 12px 12px 2px;
       }
-      .msg-role {
-        font-size: 10px; padding: 1px 5px;
-        border-radius: 3px; font-weight: 500;
-        text-transform: uppercase; letter-spacing: 0.3px;
+      
+      .chat-row.self .bubble {
+        background: var(--bubble-self);
+        color: var(--bubble-self-text);
+        border-radius: 12px 12px 2px 12px;
       }
-      .msg-role.root { background: rgba(232,168,48,0.2); color: var(--avatar-root); }
-      .msg-role.collaborator { background: rgba(76,156,232,0.2); color: var(--avatar-collab); }
-      .msg-role.viewer { background: rgba(128,128,128,0.2); color: var(--avatar-viewer); }
-      .msg-time { font-size: 11px; color: var(--text-dim); margin-left: auto; white-space: nowrap; }
 
-      .msg-content {
-        white-space: pre-wrap; word-break: break-word;
-        line-height: 1.45; font-size: 13px;
-      }
-      .msg-content a {
-        color: var(--link-color); text-decoration: none;
-      }
-      .msg-content a:hover { text-decoration: underline; }
+      .bubble a { color: inherit; text-decoration: underline; opacity: 0.9; }
+      .bubble a:hover { opacity: 1; }
 
-      /* Grouped: hide avatar if same author within 2 min */
-      .chat-row.grouped { padding-top: 1px; }
-      .chat-row.grouped .avatar { visibility: hidden; height: 0; width: 30px; }
-      .chat-row.grouped .msg-header { display: none; }
+      /* System Message */
+      .system-row {
+        align-self: center; margin: 4px 0;
+        background: var(--sys-bg); padding: 4px 12px;
+        border-radius: 12px; font-size: 11px; color: var(--text-dim);
+        text-align: center; max-width: 90%; line-height: 1.4;
+      }
 
       /* Composer */
-      .composer {
+      .composer-container {
+        padding: 12px 14px;
+        background: var(--bg);
         border-top: 1px solid var(--border);
-        padding: 8px 10px;
-        background: var(--panel);
-        display: flex; gap: 6px; align-items: flex-end;
+        z-index: 10; flex-shrink: 0;
       }
-      .input {
-        flex: 1;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 8px 12px;
-        background: var(--vscode-input-background, var(--vscode-editor-background));
-        color: var(--vscode-input-foreground, inherit);
-        font-family: inherit; font-size: 13px;
-        outline: none; resize: none;
-        min-height: 36px; max-height: 120px;
-        line-height: 1.4;
-        transition: border-color 0.15s, box-shadow 0.15s;
+      .composer {
+        display: flex; align-items: flex-end; gap: 8px;
+        background: var(--vscode-input-background, rgba(0,0,0,0.1));
+        border: 1px solid var(--vscode-input-border, var(--border));
+        border-radius: 16px; padding: 4px 4px 4px 12px;
+        transition: border-color 0.2s;
       }
-      .input::placeholder { color: var(--text-dim); }
-      .input:focus {
-        border-color: var(--vscode-focusBorder);
-        box-shadow: 0 0 0 1px var(--vscode-focusBorder);
-      }
-      .send-btn {
-        border: none; border-radius: 50%;
-        width: 34px; height: 34px;
-        background: var(--vscode-button-background);
-        color: var(--vscode-button-foreground);
-        cursor: pointer; display: flex;
-        align-items: center; justify-content: center;
-        transition: opacity 0.15s, transform 0.1s;
-        flex-shrink: 0;
-      }
-      .send-btn:hover { opacity: 0.9; transform: scale(1.05); }
-      .send-btn:active { transform: scale(0.95); }
-      .send-btn:disabled { opacity: 0.4; cursor: default; transform: none; }
-      .send-btn svg { width: 16px; height: 16px; fill: currentColor; }
-      .send-btn:focus-visible,
-      .scroll-anchor:focus-visible {
-        outline: 1px solid var(--vscode-focusBorder);
-        outline-offset: 2px;
-      }
+      .composer:focus-within { border-color: var(--accent); }
 
-      /* Scroll-to-bottom button */
+      .input {
+        flex: 1; background: transparent; border: none; color: var(--vscode-input-foreground, inherit);
+        font-family: inherit; font-size: 13px; line-height: 1.4; resize: none; outline: none;
+        min-height: 20px; max-height: 120px; padding: 6px 0; margin-bottom: 2px;
+      }
+      .input::placeholder { color: var(--text-dim); opacity: 0.7; }
+
+      .send-btn {
+        width: 30px; height: 30px; border-radius: 12px; border: none;
+        background: var(--accent); color: #fff; cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        flex-shrink: 0; transition: all 0.2s cubic-bezier(0.1, 0.8, 0.2, 1);
+        opacity: 0.5; transform: scale(0.9); pointer-events: none;
+      }
+      .send-btn.active { opacity: 1; transform: scale(1); pointer-events: auto; }
+      .send-btn:hover { filter: brightness(1.1); }
+      .send-btn:active { transform: scale(0.95); }
+      .send-btn svg { width: 14px; height: 14px; fill: currentColor; transform: translateX(1px); }
+
+      /* Scroll Anchor */
       .scroll-anchor {
-        position: sticky; bottom: 0; align-self: center;
-        background: var(--vscode-button-background);
-        color: var(--vscode-button-foreground);
-        border: 1px solid var(--border-strong); border-radius: 50%;
-        width: 28px; height: 28px;
-        cursor: pointer; display: none;
-        align-items: center; justify-content: center;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-        z-index: 10; margin-bottom: 4px;
-        font-size: 14px;
+        position: absolute; bottom: 70px; right: 14px;
+        width: 32px; height: 32px; border-radius: 50%;
+        background: var(--bubble-other); border: 1px solid var(--border);
+        color: var(--text-main); cursor: pointer; display: none;
+        align-items: center; justify-content: center; z-index: 20;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15); transition: opacity 0.2s;
       }
-      .scroll-anchor.visible { display: flex; }
-      .sr-only {
-        position: absolute !important;
-        width: 1px; height: 1px;
-        padding: 0; margin: -1px;
-        overflow: hidden; clip: rect(0, 0, 0, 0);
-        white-space: nowrap; border: 0;
-      }
+      .scroll-anchor.visible { display: flex; animation: slideUp 0.2s; }
+      .scroll-anchor:hover { background: var(--hover-bg); }
     </style>
   </head>
   <body>
     <div class="wrapper">
       <div id="chatHeader" class="chat-header">
-        <div id="chatTitle" class="chat-title">Room Chat</div>
+        <div id="chatTitle" class="chat-title">Session Chat</div>
         <div id="chatHintRow" class="chat-hint-row">
-          <div id="chatHint" class="chat-hint">Enter to send. Shift+Enter adds a new line.</div>
-          <button id="chatHintDismiss" class="chat-hint-dismiss" type="button" aria-label="Dismiss chat input tip" title="Dismiss chat input tip">Dismiss</button>
+          <div class="chat-hint">Enter to send • Shift+Enter for new line</div>
+          <button id="chatHintDismiss" class="chat-hint-dismiss" aria-label="Dismiss chat input tip" title="Dismiss chat input tip">Dismiss</button>
         </div>
       </div>
+      
       <div id="empty" class="empty-state">
-        <div class="icon">\ud83d\udcac</div>
-        <div class="title">Session chat is quiet</div>
-        <div class="subtitle">Messages from the room will appear here as soon as someone speaks up.</div>
+        <div class="empty-icon">💭</div>
+        <div class="empty-title">It's quiet here...</div>
+        <div class="empty-sub">Send a message to start collaborating with the room. End-to-End Encrypted.</div>
       </div>
-      <div id="messagesPanel" class="messages" style="display:none;" role="log" aria-live="polite" aria-labelledby="chatTitle">
-        <ol id="messageList" class="message-list" aria-label="CodeRooms chat transcript"></ol>
+
+      <div id="messagesPanel" class="messages" role="log" aria-live="polite" aria-labelledby="chatTitle">
+        <div id="messageList" aria-label="CodeRooms chat transcript"></div>
       </div>
-      <button id="scrollBtn" class="scroll-anchor" title="Scroll to bottom" aria-label="Scroll chat to the latest messages">\u2193</button>
-      <form id="composer" class="composer">
-        <textarea id="input" class="input" rows="1" placeholder="Message the room\u2026" aria-label="Message the room"></textarea>
-        <button class="send-btn" type="submit" id="sendBtn" disabled title="Send message" aria-label="Send message">
-          <svg viewBox="0 0 16 16"><path d="M1.7 1.1L14.7 7.6c.4.2.4.6 0 .8L1.7 14.9c-.4.2-.8-.1-.7-.5L2.5 9H8.5c.3 0 .5-.2.5-.5S8.8 8 8.5 8H2.5L1 1.6c-.1-.4.3-.7.7-.5z"/></svg>
-        </button>
-      </form>
+      
+      <button id="scrollBtn" class="scroll-anchor" aria-label="Scroll chat to the latest messages">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11.5L2.5 6l1-.9L8 9.5l4.5-4.4 1 .9z"/></svg>
+      </button>
+
+      <div class="composer-container">
+        <form id="composer" class="composer">
+          <textarea id="input" class="input" rows="1" placeholder="Type a message..."></textarea>
+          <button class="send-btn" type="submit" id="sendBtn" title="Send (Enter)">
+            <svg viewBox="0 0 16 16"><path d="M1.7 1.1L14.7 7.6c.4.2.4.6 0 .8L1.7 14.9c-.4.2-.8-.1-.7-.5L2.5 9H8.5c.3 0 .5-.2.5-.5S8.8 8 8.5 8H2.5L1 1.6c-.1-.4.3-.7.7-.5z"/></svg>
+          </button>
+        </form>
+      </div>
     </div>
     <script nonce="${nonce}">
       const vscode = acquireVsCodeApi();
@@ -369,47 +318,36 @@ export class ChatView implements vscode.WebviewViewProvider {
       const input = document.getElementById('input');
       const sendBtn = document.getElementById('sendBtn');
       const scrollBtn = document.getElementById('scrollBtn');
-      const chatHeader = document.getElementById('chatHeader');
       const chatHintRow = document.getElementById('chatHintRow');
-      const chatHintDismiss = document.getElementById('chatHintDismiss');
 
       let autoScroll = true;
       let viewState = vscode.getState() || {};
-      let chatHintDismissed = Boolean(viewState.chatHintDismissed);
+      let myUserId = null;
 
-      function syncChatHint() {
-        const hidden = chatHintDismissed;
-        chatHintRow.classList.toggle('hidden', hidden);
-        chatHeader.classList.toggle('compact', hidden);
+      if (viewState.chatHintDismissed) {
+        chatHintRow.classList.add('hidden');
       }
 
-      function persistViewState() {
-        viewState = { ...viewState, chatHintDismissed };
-        vscode.setState(viewState);
-      }
-
-      const formatTime = ts => {
+      function formatTime(ts) {
         try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
         catch { return ''; }
-      };
+      }
 
-      const formatDate = ts => {
+      function formatDate(ts) {
         try {
           const d = new Date(ts);
           const today = new Date();
           if (d.toDateString() === today.toDateString()) return 'Today';
-          const yesterday = new Date(today);
-          yesterday.setDate(yesterday.getDate() - 1);
-          if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
-          return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+          return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
         } catch { return ''; }
-      };
+      }
 
-      const linkify = text => {
-        return text.replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href="$1" title="$1">$1</a>');
-      };
-
-      const initial = name => (name || '?')[0];
+      function linkify(text) {
+        return text.replace(/(https?:\\/\\/[^\\s<]+)/g, '<a href="$1" target="_blank">$1</a>');
+      }
+      function escapeHtml(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      }
 
       let lastDate = '';
       let lastAuthor = '';
@@ -418,87 +356,62 @@ export class ChatView implements vscode.WebviewViewProvider {
       function renderMessages(messages, append = false, dropHeadCount = 0) {
         if (!append) {
           list.innerHTML = '';
-          lastDate = '';
-          lastAuthor = '';
-          lastTime = 0;
+          lastDate = ''; lastAuthor = ''; lastTime = 0;
         } else if (dropHeadCount > 0) {
-          trimHeadMessages(dropHeadCount);
+          for (let i = 0; i < dropHeadCount && list.firstChild; i++) {
+            list.removeChild(list.firstChild);
+          }
         }
 
         const hasMessages = append ? list.children.length > 0 || messages.length > 0 : messages.length > 0;
-        empty.style.display = hasMessages ? 'none' : '';
-        panel.style.display = hasMessages ? '' : 'none';
+        empty.style.display = hasMessages ? 'none' : 'flex';
+
         const fragment = document.createDocumentFragment();
 
         (messages || []).forEach(msg => {
-          // Date divider
           const msgDate = formatDate(msg.timestamp);
           if (msgDate && msgDate !== lastDate) {
             lastDate = msgDate;
-            lastAuthor = '';
-            const divider = document.createElement('li');
-            divider.className = 'date-divider';
-            divider.textContent = msgDate;
-            fragment.appendChild(divider);
+            const div = document.createElement('div');
+            div.className = 'date-divider'; div.textContent = msgDate;
+            fragment.appendChild(div);
           }
 
           if (msg.isSystem) {
-            const sysRow = document.createElement('li');
-            sysRow.className = 'system-row';
-            sysRow.setAttribute('role', 'status');
-            sysRow.innerHTML =
-              '<span class="sys-icon" aria-hidden="true">\u2139\ufe0f</span>' +
-              '<span>' + escapeHtml(msg.content) + '</span>' +
-              '<span class="sys-time">' + formatTime(msg.timestamp) + '</span>';
-            fragment.appendChild(sysRow);
+            const sys = document.createElement('div');
+            sys.className = 'system-row';
+            sys.innerHTML = '<strong>' + formatTime(msg.timestamp) + '</strong> &mdash; ' + escapeHtml(msg.content);
+            fragment.appendChild(sys);
             lastAuthor = '';
             return;
           }
 
-          // Group consecutive messages from same author within 2 min
+          const isSelf = msg.fromUserId === myUserId;
           const sameAuthor = msg.fromUserId === lastAuthor;
-          const withinGroup = sameAuthor && (msg.timestamp - lastTime < 120000);
+          const withinGroup = sameAuthor && (msg.timestamp - lastTime < 60000);
 
-          const row = document.createElement('li');
-          row.className = 'chat-row' + (withinGroup ? ' grouped' : '');
-          row.setAttribute('aria-label', msg.fromName + ', ' + (msg.role || 'viewer') + ', ' + formatTime(msg.timestamp));
+          const row = document.createElement('div');
+          row.className = 'chat-row ' + (isSelf ? 'self' : 'other');
+          
+          if (!withinGroup) {
+            const meta = document.createElement('div');
+            meta.className = 'msg-meta';
+            const name = document.createElement('span');
+            name.className = 'msg-name';
+            name.textContent = isSelf ? 'You' : msg.fromName;
+            const time = document.createElement('span');
+            time.textContent = formatTime(msg.timestamp);
+            meta.appendChild(name);
+            meta.appendChild(time);
+            row.appendChild(meta);
+          }
 
-          const avatar = document.createElement('div');
-          avatar.className = 'avatar ' + (msg.role || 'viewer');
-          avatar.textContent = initial(msg.fromName);
-          avatar.setAttribute('aria-hidden', 'true');
-          row.appendChild(avatar);
+          const bubble = document.createElement('div');
+          bubble.className = 'bubble';
+          bubble.innerHTML = linkify(escapeHtml(msg.content));
+          row.appendChild(bubble);
 
-          const body = document.createElement('div');
-          body.className = 'msg-body';
-
-          const header = document.createElement('div');
-          header.className = 'msg-header';
-          const name = document.createElement('span');
-          name.className = 'msg-name';
-          name.textContent = msg.fromName;
-          header.appendChild(name);
-
-          const roleBadge = document.createElement('span');
-          roleBadge.className = 'msg-role ' + (msg.role || 'viewer');
-          roleBadge.textContent = msg.role === 'root' ? 'owner' : msg.role || 'guest';
-          header.appendChild(roleBadge);
-
-          const time = document.createElement('span');
-          time.className = 'msg-time';
-          time.textContent = formatTime(msg.timestamp);
-          header.appendChild(time);
-
-          body.appendChild(header);
-
-          const content = document.createElement('div');
-          content.className = 'msg-content';
-          content.innerHTML = linkify(escapeHtml(msg.content));
-          body.appendChild(content);
-
-          row.appendChild(body);
           fragment.appendChild(row);
-
           lastAuthor = msg.fromUserId;
           lastTime = msg.timestamp;
         });
@@ -512,38 +425,8 @@ export class ChatView implements vscode.WebviewViewProvider {
         }
       }
 
-      function trimHeadMessages(messageCount) {
-        let remaining = messageCount;
-        while (remaining > 0 && list.firstChild) {
-          const node = list.firstChild;
-          const isMessageNode = node.classList?.contains('chat-row') || node.classList?.contains('system-row');
-          list.removeChild(node);
-          if (isMessageNode) {
-            remaining -= 1;
-          }
-        }
-        while (list.firstChild?.classList?.contains('date-divider')) {
-          list.removeChild(list.firstChild);
-        }
-        if (!list.childNodes.length) {
-          lastDate = '';
-          lastAuthor = '';
-          lastTime = 0;
-        }
-      }
-
-      function escapeHtml(s) {
-        return String(s)
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;')
-          .replace(/'/g, '&#039;');
-      }
-
-      // Auto-scroll detection
       panel.addEventListener('scroll', () => {
-        const threshold = 60;
+        const threshold = 40;
         const atBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < threshold;
         autoScroll = atBottom;
         scrollBtn.classList.toggle('visible', !atBottom);
@@ -551,25 +434,24 @@ export class ChatView implements vscode.WebviewViewProvider {
 
       scrollBtn.addEventListener('click', () => {
         panel.scrollTop = panel.scrollHeight;
-        autoScroll = true;
-        scrollBtn.classList.remove('visible');
       });
 
-      chatHintDismiss.addEventListener('click', () => {
-        chatHintDismissed = true;
-        persistViewState();
-        syncChatHint();
+      document.getElementById('chatHintDismiss').addEventListener('click', () => {
+        chatHintRow.classList.add('hidden');
+        viewState = { ...viewState, chatHintDismissed: true };
+        vscode.setState(viewState);
       });
 
-      // Enable/disable send button
       input.addEventListener('input', () => {
-        input.style.height = '36px';
+        input.style.height = '20px';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-        sendBtn.disabled = !input.value.trim();
+        const hasText = input.value.trim().length > 0;
+        sendBtn.classList.toggle('active', hasText);
       });
 
       window.addEventListener('message', event => {
         if (event.data?.type === 'messages') {
+          if (event.data.myUserId) myUserId = event.data.myUserId;
           renderMessages(event.data.payload, event.data.append, event.data.dropHeadCount || 0);
         }
         if (event.data?.type === 'focus') {
@@ -583,8 +465,8 @@ export class ChatView implements vscode.WebviewViewProvider {
         if (!value) return;
         vscode.postMessage({ type: 'send', content: value });
         input.value = '';
-        input.style.height = '36px';
-        sendBtn.disabled = true;
+        input.style.height = '20px';
+        sendBtn.classList.remove('active');
         input.focus();
       });
 
@@ -595,8 +477,7 @@ export class ChatView implements vscode.WebviewViewProvider {
         }
       });
 
-      syncChatHint();
-      setTimeout(() => input.focus(), 80);
+      setTimeout(() => input.focus(), 100);
     </script>
   </body>
 </html>

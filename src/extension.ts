@@ -118,12 +118,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  const chatManager = new ChatManager(context.workspaceState);
   const documentSync = new DocumentSync(roomState, roomStorage, sendClientMessage);
   const suggestionManager = new SuggestionManager(roomState, documentSync);
   const participantsView = new ParticipantsView(roomState, documentSync, suggestionManager, followController);
-  const chatManager = new ChatManager(context.globalState);
+  const chatView = new ChatView(chatManager, roomState);
   const cursorManager = new CursorManager();
-  const chatView = new ChatView(chatManager);
   let lastJoinRoomId: string | undefined;
   let lastJoinDisplayName: string | undefined;
   let lastJoinSecret: string | undefined; // preserved for auto-rejoin on reconnect
