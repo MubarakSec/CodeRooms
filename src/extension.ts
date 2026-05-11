@@ -416,6 +416,7 @@ export function activate(context: vscode.ExtensionContext): void {
         chatManager.setRoom(message.roomId);
         await logRoomEvent({ type: 'joined', userId: message.userId });
         e2eKey = consumePendingRoomSecret(roomSecret, message.roomId);
+        roomState.setE2EKey(e2eKey);
         pendingSecret = undefined;
         flushPending();
         statusBar.update();
@@ -454,6 +455,7 @@ export function activate(context: vscode.ExtensionContext): void {
         chatManager.setRoom(message.roomId);
 
         e2eKey = consumePendingRoomSecret(roomSecret, message.roomId);
+        roomState.setE2EKey(e2eKey);
         pendingSecret = undefined;
         flushPending();
         
@@ -548,7 +550,7 @@ export function activate(context: vscode.ExtensionContext): void {
         break;
       }
       case 'docChangeBroadcast': {
-        await documentSync.applyRemoteChange(message.docId, message.patch, message.version);
+        void documentSync.applyRemoteChange(message.docId, message.patch, message.version, message.yjsUpdate);
         break;
       }
       case 'shareDocument': {

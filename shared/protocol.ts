@@ -46,7 +46,7 @@ export type ClientToServerMessage =
   | { type: "leaveRoom" }
   | { type: "removeParticipant"; userId: string }
   | { type: "updateRole"; userId: string; role: "collaborator" | "viewer" }
-  | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text: string; version: number }
+  | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text: string; version: number; yjsState?: YjsUpdate }
   | { type: "unshareDocument"; roomId: string; documentId: string }
   | { type: "docChange"; roomId: string; docId: string; version: number; patch: TextPatch; yjsUpdate?: YjsUpdate }
   | { type: "suggestion"; roomId: string; docId: string; suggestionId: string; patches: TextPatch[]; yjsUpdate?: YjsUpdate; authorId: string; authorName: string; createdAt: number }

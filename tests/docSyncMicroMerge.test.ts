@@ -73,13 +73,15 @@ vi.mock('vscode', () => {
 });
 
 import { DocumentSync } from '../src/core/DocumentSync';
+import * as Y from 'yjs';
 
 const fakeRoomState = {
   getRoomId: () => 'room1',
   setActiveSharedDocLabel: () => {},
   isRoot: () => false,
   isCollaborator: () => true,
-  isCollaboratorInDirectMode: () => true
+  isCollaboratorInDirectMode: () => true,
+  getE2EKey: () => undefined
 } as any;
 
 const fakeStorage = {
@@ -101,13 +103,16 @@ const patch = {
 describe('DocumentSync micro-merge (gap 1 version)', () => {
   it('applies patch when version gap is 1 step and avoids full sync request', async () => {
     const sync = new DocumentSync(fakeRoomState, fakeStorage, (msg) => sendSpy.push(msg as any));
+    const yDoc = new Y.Doc();
+    yDoc.getText('text').insert(0, 'text');
     (sync as any).documents.set('d1', {
       docId: 'd1',
       sharedDocument: fakeDoc,
       uri: { toString: () => 'file:///tmp/doc' },
       version: 1,
       lastSyncedText: 'text',
-      pendingSnapshot: false
+      pendingSnapshot: false,
+      yDoc
     });
     (sync as any).activeDocumentId = 'd1';
 

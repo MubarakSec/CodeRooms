@@ -161,7 +161,8 @@ describe('DocumentSync reconciliation', () => {
         isCollaboratorInDirectMode: () => false,
         isViewer: () => false,
         isRoot: () => true,
-        getUserId: () => 'root-1'
+        getUserId: () => 'root-1',
+        getE2EKey: () => undefined
       } as any,
       {
         prepare: async () => {},
@@ -206,7 +207,8 @@ describe('DocumentSync reconciliation', () => {
         isCollaborator: () => false,
         isCollaboratorInDirectMode: () => false,
         isViewer: () => false,
-        getUserId: () => 'root-1'
+        getUserId: () => 'root-1',
+        getE2EKey: () => undefined
       } as any,
       { updateVersion: async () => {}, prepare: async () => {} } as any,
       message => sent.push(message)
@@ -247,7 +249,8 @@ describe('DocumentSync reconciliation', () => {
         isCollaborator: () => false,
         isCollaboratorInDirectMode: () => false,
         isViewer: () => false,
-        getUserId: () => 'root-1'
+        getUserId: () => 'root-1',
+        getE2EKey: () => undefined
       } as any,
       { updateVersion: async () => {}, prepare: async () => {}, getEntry: async () => undefined } as any,
       () => {}
@@ -281,7 +284,8 @@ describe('DocumentSync reconciliation', () => {
         isCollaborator: () => false,
         isCollaboratorInDirectMode: () => false,
         isViewer: () => false,
-        getUserId: () => 'root-1'
+        getUserId: () => 'root-1',
+        getE2EKey: () => undefined
       } as any,
       { updateVersion: async () => {}, prepare: async () => {} } as any,
       () => {}
@@ -312,7 +316,8 @@ describe('DocumentSync reconciliation', () => {
         isCollaborator: () => false,
         isCollaboratorInDirectMode: () => false,
         isViewer: () => false,
-        getUserId: () => 'root-1'
+        getUserId: () => 'root-1',
+        getE2EKey: () => undefined
       } as any,
       { updateVersion: async () => {}, prepare: async () => {} } as any,
       () => {}

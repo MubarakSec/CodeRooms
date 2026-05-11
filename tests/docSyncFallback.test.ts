@@ -78,13 +78,15 @@ vi.mock('vscode', () => {
 });
 
 import { DocumentSync } from '../src/core/DocumentSync';
+import * as Y from 'yjs';
 
 const fakeRoomState = {
   getRoomId: () => 'room1',
   setActiveSharedDocLabel: () => {},
   isRoot: () => false,
   isCollaborator: () => true,
-  isCollaboratorInDirectMode: () => true
+  isCollaboratorInDirectMode: () => true,
+  getE2EKey: () => undefined
 } as any;
 
 const fakeStorage = {
@@ -107,12 +109,15 @@ describe('DocumentSync applyRemoteChange fallback', () => {
   it('requests full sync after two failed patch applications and warns user', async () => {
     const sent: any[] = [];
     const sync = new DocumentSync(fakeRoomState, fakeStorage, (msg) => sent.push(msg as any));
+    const yDoc = new Y.Doc();
+    yDoc.getText('text').insert(0, 'text');
     (sync as any).documents.set('d1', {
       docId: 'd1',
       sharedDocument: fakeDoc,
       version: 1,
       lastSyncedText: 'text',
-      pendingSnapshot: false
+      pendingSnapshot: false,
+      yDoc
     });
     (sync as any).activeDocumentId = 'd1';
 

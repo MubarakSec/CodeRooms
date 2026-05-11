@@ -13,6 +13,7 @@ export class RoomState {
   private participantFiles = new Map<string, string>();
   private mode?: RoomMode;
   private activeSharedDocLabel?: string;
+  private e2eKey?: Buffer;
 
   setSelfInfo(userId: string, role: Role, roomId?: string, displayName?: string): void {
     this.userId = userId;
@@ -192,6 +193,14 @@ export class RoomState {
 
   getRoomMode(): RoomMode | undefined {
     return this.mode;
+  }
+
+  setE2EKey(key: Buffer | undefined): void {
+    this.e2eKey = key;
+  }
+
+  getE2EKey(): Buffer | undefined {
+    return this.e2eKey;
   }
 
   private syncCollaboratorMode(): void {
