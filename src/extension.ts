@@ -1180,6 +1180,18 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const messageId = uuidv4();
     const timestamp = Date.now();
+
+    // Optimistically add message to UI
+    chatManager.addMessage({
+      messageId,
+      fromUserId: roomState.getUserId() ?? 'local',
+      fromName: roomState.getDisplayName() ?? 'Me',
+      role: roomState.getRole() ?? 'viewer',
+      content: trimmed,
+      timestamp,
+      isSystem: false
+    });
+
     // Encrypt if E2E is active — server relays ciphertext without seeing plaintext
     const finalContent = e2eKey
       ? `e2e:${JSON.stringify(encrypt(trimmed, e2eKey))}`

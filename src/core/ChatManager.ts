@@ -30,6 +30,9 @@ export class ChatManager extends vscode.Disposable {
   }
 
   addMessage(msg: ChatMessage): void {
+    if (this.messages.some(m => m.messageId === msg.messageId)) {
+      return;
+    }
     this.messages.push(msg);
     if (this.messages.length > this.memoryLimit) {
       this.messages.splice(0, this.messages.length - this.memoryLimit);

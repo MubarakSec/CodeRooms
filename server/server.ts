@@ -2,7 +2,7 @@ import { randomBytes, pbkdf2, timingSafeEqual } from 'crypto';
 import { promisify } from 'util';
 
 const pbkdf2Async = promisify(pbkdf2);
-import fs, { promises as fsp } from 'fs';
+import fs from 'fs';
 import https from 'https';
 import minimist from 'minimist';
 import { v4 as uuidv4 } from 'uuid';
@@ -30,14 +30,7 @@ import {
   canSendChat
 } from './authorization';
 import { prepareRoomClosure } from './roomClosure';
-import {
-  getCorruptBackupPath,
-  parseRoomsBackup,
-  serializeRoomsBackup,
-  writeRoomsBackupAtomically,
-  writeRoomsBackupAtomicallySync,
-  type PersistedRoomState
-} from './backupPersistence';
+import { type PersistedRoomState } from './backupPersistence';
 import {
   MAX_INVITE_LABEL_LENGTH,
   validateClientMessage
@@ -151,7 +144,6 @@ const connectionsPerIp = new Map<string, number>();
 let roomOperationGuards = createRoomOperationGuards();
 const roomLastActivity = new Map<string, number>();
 let backupDir = DEFAULT_BACKUP_DIR;
-let backupFile = path.join(DEFAULT_BACKUP_DIR, 'rooms-backup.json');
 let persistRoomsEnabled = true;
 let loadPersistedRoomsEnabled = true;
 let activeWss: WebSocketServer | undefined;
@@ -161,6 +153,8 @@ let cleanupTimer: NodeJS.Timeout | undefined;
 let queueRoomSave: (() => Promise<void>) | undefined;
 let sigtermHandler: (() => void) | undefined;
 let sigintHandler: (() => void) | undefined;
+
+import { loadRoomsFromDb, saveRoomToDb, deleteRoomFromDb } from './db';
 
 function buildPersistedRoomsSnapshot(): Record<string, PersistedRoomState> {
   const data: Record<string, PersistedRoomState> = {};
@@ -199,28 +193,8 @@ async function saveRooms(): Promise<void> {
   const savedAt = Date.now();
   const metrics = buildCurrentRecoveryMetrics();
   
-  // Atomic write: write to temp file first, then rename to prevent corruption on crash
-  await writeRoomsBackupAtomically(fsp, backupFile, serializeRoomsBackup(data, savedAt));
-  
-  // Create timestamped backup (keep last 10)
-  const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
-  const archivedFile = path.join(backupDir, `rooms-${timestamp}.json`);
-  await fsp.writeFile(archivedFile, serializeRoomsBackup(data, savedAt));
-  
-  // Cleanup old backups (keep last 10)
-  try {
-    const files = (await fsp.readdir(backupDir))
-      .filter(f => f.startsWith('rooms-') && f.endsWith('.json') && f !== 'rooms-backup.json')
-      .sort()
-      .reverse();
-    
-    if (files.length > 10) {
-      for (let i = 10; i < files.length; i++) {
-        await fsp.unlink(path.join(backupDir, files[i]));
-      }
-    }
-  } catch (e) {
-    log('backup_cleanup_error', { error: String(e) });
+  for (const [roomId, state] of Object.entries(data)) {
+    saveRoomToDb(roomId, state);
   }
 
   log('rooms_saved', {
@@ -235,18 +209,19 @@ async function saveRooms(): Promise<void> {
 }
 
 function loadRooms(): void {
-  if (!loadPersistedRoomsEnabled || !fs.existsSync(backupFile)) {
+  if (!loadPersistedRoomsEnabled) {
     log('rooms_restore_skipped', { reason: 'no_backup' });
     return;
   }
 
-  log('rooms_restore_started', { backupFile: backupFile });
+  log('rooms_restore_started', { backend: 'sqlite' });
 
   try {
-    const raw = fs.readFileSync(backupFile, 'utf-8');
-    const parsedBackup = parseRoomsBackup(raw);
-    for (const roomId in parsedBackup.rooms) {
-      const d = parsedBackup.rooms[roomId];
+    const loadedRooms = loadRoomsFromDb();
+    let skippedRooms = 0;
+    
+    for (const roomId in loadedRooms) {
+      const d = loadedRooms[roomId];
       const restoredDocs = new Map<string, DocumentState>(
         d.documents.map(([docId, doc]) => [
           docId,
@@ -276,6 +251,7 @@ function loadRooms(): void {
         secretHash: d.secretHash,
         chat: d.chat || []
       });
+      joinRoomPubSub(roomId);
       roomLastActivity.set(roomId, Date.now());
     }
     const recovered = buildRecoveryMetrics(Array.from(rooms.values(), room => ({
@@ -291,9 +267,8 @@ function loadRooms(): void {
       roomCountByIp.set(ip, count);
     }
     log('rooms_restore_complete', {
-      backupVersion: parsedBackup.version,
-      savedAt: parsedBackup.savedAt,
-      skippedRooms: parsedBackup.skippedRooms,
+      backend: 'sqlite',
+      skippedRooms: skippedRooms,
       roomCount: recovered.roomCount,
       documentCount: recovered.documentCount,
       suggestionCount: recovered.suggestionCount,
@@ -303,14 +278,7 @@ function loadRooms(): void {
       ownerIpBuckets: recovered.roomCountByIp.size
     });
   } catch (e) {
-    const corruptPath = getCorruptBackupPath(backupFile);
-    try {
-      fs.renameSync(backupFile, corruptPath);
-      log('backup_quarantined', { backupFile: backupFile, corruptPath });
-    } catch (renameError) {
-      log('backup_quarantine_error', { error: String(renameError) });
-    }
-    log('error', { message: 'Failed to load rooms backup', error: String(e) });
+    log('error', { message: 'Failed to load rooms backup from sqlite', error: String(e) });
   }
 }
 
@@ -374,7 +342,11 @@ function saveRoomsSync(): void {
   const data = buildPersistedRoomsSnapshot();
   const metrics = buildCurrentRecoveryMetrics();
   const savedAt = Date.now();
-  writeRoomsBackupAtomicallySync(fs, backupFile, serializeRoomsBackup(data, savedAt));
+  
+  for (const [roomId, state] of Object.entries(data)) {
+    saveRoomToDb(roomId, state);
+  }
+
   log('rooms_saved_sync', {
     roomCount: metrics.roomCount,
     documentCount: metrics.documentCount,
@@ -590,14 +562,27 @@ export async function stopCodeRoomsServer(): Promise<void> {
   resetInMemoryState();
 }
 
+import { initRedis, subscribeToRoomBroadcasts, joinRoomPubSub, leaveRoomPubSub, broadcastToRoomPubSub } from './redis';
+
 export async function startCodeRoomsServer(options: StartCodeRoomsServerOptions = {}): Promise<StartedCodeRoomsServer> {
   if (activeWss) {
     throw new Error('CodeRooms server is already running in this process.');
   }
 
+  const redisUrl = process.env.REDIS_URL;
+  if (redisUrl) {
+    initRedis(redisUrl);
+    subscribeToRoomBroadcasts((roomId, message) => {
+      const room = rooms.get(roomId);
+      if (room) {
+        broadcast(room, message, undefined, true);
+      }
+    });
+    log('redis_initialized', { url: redisUrl });
+  }
+
   resetInMemoryState();
   backupDir = options.backupDir ?? DEFAULT_BACKUP_DIR;
-  backupFile = path.join(backupDir, 'rooms-backup.json');
   persistRoomsEnabled = options.persistRooms ?? true;
   loadPersistedRoomsEnabled = options.loadPersistedRooms ?? persistRoomsEnabled;
   ensureBackupDirectory();
@@ -769,6 +754,7 @@ async function createRoomInner(context: ConnectionContext, displayName: string, 
   };
 
   rooms.set(roomId, room);
+  joinRoomPubSub(roomId);
   roomCountByIp.set(ipKey, ipRoomCount + 1);
   if (context.roomId) {
     cleanupRoomMembership(context, 'switch');
@@ -969,6 +955,8 @@ function deleteRoom(roomId: string): void {
     else { roomCountByIp.set(room.ownerIp, count - 1); }
   }
   rooms.delete(roomId);
+  leaveRoomPubSub(roomId);
+  deleteRoomFromDb(roomId);
   roomLastActivity.delete(roomId);
 }
 
@@ -1257,6 +1245,22 @@ function handleDocChange(context: ConnectionContext, message: Extract<ClientToSe
   // all patches applied since the client's base version.
   let patchToApply = message.patch;
   if (message.version <= doc.version && doc.patchHistory.length > 0) {
+    // Check for replay of an already applied patch (e.g. dropped ACK)
+    const isDuplicate = doc.patchHistory.some(
+      h => h.authorId === context.userId &&
+           h.version > message.version &&
+           h.patch.text === message.patch.text &&
+           h.patch.range.start.line === message.patch.range.start.line &&
+           h.patch.range.start.character === message.patch.range.start.character &&
+           h.patch.range.end.line === message.patch.range.end.line &&
+           h.patch.range.end.character === message.patch.range.end.character
+    );
+
+    if (isDuplicate) {
+      sendAckForMessage(context.ws, message);
+      return;
+    }
+
     const transformed = transformPatch(
       doc.text,
       message.patch,
@@ -1738,7 +1742,11 @@ function handleCreateToken(context: ConnectionContext, label?: string): void {
   log('token_created', { roomId: room.roomId, label });
 }
 
-function broadcast(room: RoomState, message: ServerToClientMessage, except?: WebSocket): void {
+function broadcast(room: RoomState, message: ServerToClientMessage, except?: WebSocket, isFromRedis = false): void {
+  if (!isFromRedis) {
+    broadcastToRoomPubSub(room.roomId, message);
+  }
+
   for (const connection of room.connections.values()) {
     if (connection.ws === except) {
       continue;

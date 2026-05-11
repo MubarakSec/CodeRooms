@@ -7,7 +7,7 @@ export class OutboundMessageQueue {
 
   constructor(
     private readonly sendNow: (message: ClientToServerMessage) => void,
-    private readonly maxPendingAck = 200
+    private readonly maxPendingAck = 10000
   ) {}
 
   send(message: ClientToServerMessage, isConnected: boolean): void {

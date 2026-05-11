@@ -46,7 +46,7 @@ export class ChatView implements vscode.WebviewViewProvider {
     this.postTimer = setTimeout(() => {
       this.postTimer = undefined;
       this.postMessages();
-    }, 40);
+    }, 0);
   }
 
   private postMessages(): void {

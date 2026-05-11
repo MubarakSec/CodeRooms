@@ -21,6 +21,9 @@ export interface TextPatch {
   text: string;
 }
 
+// For Yjs + E2EE, updates are just encrypted base64 strings
+export type YjsUpdate = string;
+
 export type SuggestionReviewAction = "accept" | "reject";
 
 export interface Suggestion {
@@ -30,6 +33,7 @@ export interface Suggestion {
   authorId: string;
   authorName: string;
   patches: TextPatch[];
+  yjsUpdate?: YjsUpdate; // Optional for backward compatibility during migration
   createdAt: number;
   status: "pending" | "accepted" | "rejected";
   reviewedAt?: number;
@@ -44,14 +48,14 @@ export type ClientToServerMessage =
   | { type: "updateRole"; userId: string; role: "collaborator" | "viewer" }
   | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text: string; version: number }
   | { type: "unshareDocument"; roomId: string; documentId: string }
-  | { type: "docChange"; roomId: string; docId: string; version: number; patch: TextPatch }
-  | { type: "suggestion"; roomId: string; docId: string; suggestionId: string; patches: TextPatch[]; authorId: string; authorName: string; createdAt: number }
+  | { type: "docChange"; roomId: string; docId: string; version: number; patch: TextPatch; yjsUpdate?: YjsUpdate }
+  | { type: "suggestion"; roomId: string; docId: string; suggestionId: string; patches: TextPatch[]; yjsUpdate?: YjsUpdate; authorId: string; authorName: string; createdAt: number }
   | { type: "acceptSuggestion"; roomId: string; suggestionId: string }
   | { type: "rejectSuggestion"; roomId: string; suggestionId: string }
   | { type: "reviewSuggestions"; roomId: string; suggestionIds: string[]; action: SuggestionReviewAction }
   | { type: "setEditMode"; userId: string; direct: boolean }
   | { type: "requestFullSync"; roomId: string; docId: string }
-  | { type: "fullDocumentSync"; roomId: string; docId: string; text: string; version: number }
+  | { type: "fullDocumentSync"; roomId: string; docId: string; text: string; version: number; yjsState?: YjsUpdate }
   | { type: "rootCursor"; roomId: string; docId: string; uri: string; position: Position }
   | { type: "cursorUpdate"; roomId: string; userId?: string; userName?: string; docId: string; uri: string; position: Position; selections?: { start: Position; end: Position }[] }
   | { type: "participantActivity"; roomId: string; userId: string; activity: "typing" | "idle"; at: number }
@@ -67,10 +71,10 @@ export type ServerToClientMessage =
   | { type: "participantLeft"; userId: string }
   | { type: "roleUpdated"; userId: string; role: Role }
   | { type: "editModeUpdated"; userId: string; isDirectEditMode: boolean }
-  | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text: string; version: number }
+  | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text: string; version: number; yjsState?: YjsUpdate }
   | { type: "documentUnshared"; roomId: string; documentId: string }
-  | { type: "docChangeBroadcast"; docId: string; version: number; patch: TextPatch; authorId: string }
-  | { type: "fullDocumentSync"; roomId: string; docId: string; version: number; text: string }
+  | { type: "docChangeBroadcast"; docId: string; version: number; patch: TextPatch; yjsUpdate?: YjsUpdate; authorId: string }
+  | { type: "fullDocumentSync"; roomId: string; docId: string; version: number; text: string; yjsState?: YjsUpdate }
   | { type: "requestFullSync"; roomId: string; docId: string }
   | { type: "newSuggestion"; suggestion: Suggestion }
   | { type: "suggestionAccepted"; suggestionId: string; docId: string }
