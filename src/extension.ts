@@ -119,7 +119,12 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const chatManager = new ChatManager(context.workspaceState);
-  const documentSync = new DocumentSync(roomState, roomStorage, sendClientMessage);
+  const documentSync = new DocumentSync(roomState, roomStorage, sendClientMessage, (docId, userId, userName, uri, position, selections) => {
+    cursorManager.updateCursor(userId, userName, uri, position, selections);
+    const fileName = decodeURIComponent(uri.split("/").pop() || "Unknown");
+    roomState.setParticipantFile(userId, fileName);
+    scheduleRefresh();
+  });
   const suggestionManager = new SuggestionManager(roomState, documentSync);
   const participantsView = new ParticipantsView(roomState, documentSync, suggestionManager, followController);
   const chatView = new ChatView(chatManager, roomState);
@@ -189,14 +194,7 @@ export function activate(context: vscode.ExtensionContext): void {
       });
     }
 
-    sendClientMessage({
-      type: 'cursorUpdate',
-      roomId,
-      docId,
-      uri: sharedUri.toString(),
-      position,
-      selections
-    });
+    documentSync.updateLocalAwareness(docId, position, selections);
   };
 
   const scheduleRootCursorBroadcast = (editor?: vscode.TextEditor): void => {
@@ -247,6 +245,7 @@ export function activate(context: vscode.ExtensionContext): void {
     visibleEditorsListener,
     selectionListener,
     followDisposable,
+    vscode.languages.registerCodeLensProvider({ scheme: 'file' }, suggestionManager),
     { dispose: () => webSocket.disconnect() },
     { dispose: () => suggestionManager.dispose() },
     { dispose: () => documentSync.dispose() },
@@ -570,13 +569,8 @@ export function activate(context: vscode.ExtensionContext): void {
         await documentSync.handleRequestFullSync(message);
         break;
       }
-      case 'cursorUpdate': {
-        if (message.userId && message.userName) {
-          cursorManager.updateCursor(message.userId, message.userName, message.uri, message.position, message.selections);
-          const fileName = decodeURIComponent(message.uri.split("/").pop() || "Unknown");
-          roomState.setParticipantFile(message.userId, fileName);
-          scheduleRefresh();
-        }
+      case 'awarenessUpdate': {
+        documentSync.applyAwarenessUpdate(message.docId, message.update);
         break;
       }
       case 'rootCursor': {
@@ -853,6 +847,42 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     documentSync.shareDocument(editor.document);
     scheduleRootCursorBroadcast(editor);
+  }
+
+  async function shareWorkspace(): Promise<void> {
+    if (!roomState.isRoot()) {
+      void vscode.window.showWarningMessage('Only the room owner can share the entire workspace.');
+      return;
+    }
+    
+    const confirm = await vscode.window.showInformationMessage(
+      'This will share all files in your workspace with the room. Are you sure?',
+      'Share All', 'Cancel'
+    );
+    if (confirm !== 'Share All') return;
+
+    await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: 'Sharing Workspace...',
+      cancellable: true
+    }, async (progress, token) => {
+      const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**');
+      const total = files.length;
+      let count = 0;
+
+      for (const uri of files) {
+        if (token.isCancellationRequested) break;
+        try {
+          const doc = await vscode.workspace.openTextDocument(uri);
+          documentSync.shareDocument(doc);
+          count++;
+          progress.report({ message: `${count}/${total} files shared`, increment: (1 / total) * 100 });
+        } catch (e) {
+          logger.error(`Failed to share ${uri.fsPath}: ${String(e)}`);
+        }
+      }
+      void vscode.window.showInformationMessage(`Successfully shared ${count} files from the workspace.`);
+    });
   }
 
   function toggleFollowRoot(): void {
@@ -1272,6 +1302,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('coderooms.joinRoom', joinRoom),
     vscode.commands.registerCommand('coderooms.leaveRoom', leaveRoom),
     vscode.commands.registerCommand('coderooms.shareCurrentFile', shareCurrentFile),
+    vscode.commands.registerCommand('coderooms.shareWorkspace', shareWorkspace),
     vscode.commands.registerCommand('coderooms.toggleCollaboratorMode', toggleCollaboratorMode),
     vscode.commands.registerCommand('coderooms.toggleFollowRoot', toggleFollowRoot),
     vscode.commands.registerCommand('coderooms.exportRoom', exportRoom),

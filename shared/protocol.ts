@@ -21,8 +21,8 @@ export interface TextPatch {
   text: string;
 }
 
-// For Yjs + E2EE, updates are just encrypted base64 strings
-export type YjsUpdate = string;
+// For Yjs + E2EE, updates are pure binary Uint8Arrays
+export type YjsUpdate = Uint8Array;
 
 export type SuggestionReviewAction = "accept" | "reject";
 
@@ -60,6 +60,7 @@ export type ClientToServerMessage =
   | { type: "cursorUpdate"; roomId: string; userId?: string; userName?: string; docId: string; uri: string; position: Position; selections?: { start: Position; end: Position }[] }
   | { type: "participantActivity"; roomId: string; userId: string; activity: "typing" | "idle"; at: number }
   | { type: "chatSend"; roomId: string; messageId: string; content: string; timestamp: number }
+  | { type: "awarenessUpdate"; roomId: string; docId: string; update: Uint8Array }
   | { type: "createToken"; label?: string };
 
 export type ServerToClientMessage =
@@ -74,6 +75,7 @@ export type ServerToClientMessage =
   | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text: string; version: number; yjsState?: YjsUpdate }
   | { type: "documentUnshared"; roomId: string; documentId: string }
   | { type: "docChangeBroadcast"; docId: string; version: number; patch: TextPatch; yjsUpdate?: YjsUpdate; authorId: string }
+  | { type: "awarenessUpdate"; docId: string; update: Uint8Array }
   | { type: "fullDocumentSync"; roomId: string; docId: string; version: number; text: string; yjsState?: YjsUpdate }
   | { type: "requestFullSync"; roomId: string; docId: string }
   | { type: "newSuggestion"; suggestion: Suggestion }

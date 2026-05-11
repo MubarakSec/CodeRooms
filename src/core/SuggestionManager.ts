@@ -4,16 +4,18 @@ import { RoomState } from './RoomState';
 import { DocumentSync } from './DocumentSync';
 import { buildSuggestionPreview } from '../util/suggestionPreview';
 
-export class SuggestionManager {
+export class SuggestionManager implements vscode.CodeLensProvider {
   private suggestions = new Map<string, Suggestion>();
   private readonly decorationType: vscode.TextEditorDecorationType;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly changeEmitter = new vscode.EventEmitter<void>();
+  private readonly codeLensEmitter = new vscode.EventEmitter<void>();
   private refreshTimer?: NodeJS.Timeout;
   private acceptHandler?: (suggestion: Suggestion) => Promise<void> | void;
   private rejectHandler?: (suggestion: Suggestion) => Promise<void> | void;
 
   readonly onDidChange = this.changeEmitter.event;
+  readonly onDidChangeCodeLenses = this.codeLensEmitter.event;
 
   constructor(
     private readonly roomState: RoomState,
@@ -202,7 +204,43 @@ export class SuggestionManager {
     );
   }
 
+  provideCodeLenses(document: vscode.TextDocument, _token: vscode.CancellationToken): vscode.CodeLens[] | undefined {
+    if (!this.roomState.isRoot()) {
+      return undefined;
+    }
+    const activeDocId = this.documentSync?.getActiveDocumentId();
+    if (!activeDocId || !this.documentSync) {
+      return undefined;
+    }
+    const sharedUri = this.documentSync.getDocumentUri(activeDocId);
+    if (!sharedUri || document.uri.toString() !== sharedUri.toString()) {
+      return undefined;
+    }
+
+    const lenses: vscode.CodeLens[] = [];
+    for (const suggestion of this.suggestions.values()) {
+      if (suggestion.docId !== activeDocId || suggestion.status !== 'pending') continue;
+      
+      const firstPatch = suggestion.patches[0];
+      if (!firstPatch) continue;
+      
+      const range = this.rangeFromPatch(firstPatch);
+      lenses.push(new vscode.CodeLens(range, {
+        title: `✅ Accept Suggestion (by ${suggestion.authorName})`,
+        command: 'coderooms.acceptSuggestion',
+        arguments: [suggestion]
+      }));
+      lenses.push(new vscode.CodeLens(range, {
+        title: `❌ Reject`,
+        command: 'coderooms.rejectSuggestion',
+        arguments: [suggestion]
+      }));
+    }
+    return lenses;
+  }
+
   private emitChange(): void {
     this.changeEmitter.fire();
+    this.codeLensEmitter.fire();
   }
 }

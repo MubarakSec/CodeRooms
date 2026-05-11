@@ -28,6 +28,7 @@
         "onCommand:coderooms.joinRoom",
         "onCommand:coderooms.leaveRoom",
         "onCommand:coderooms.shareCurrentFile",
+        "onCommand:coderooms.shareWorkspace",
         "onCommand:coderooms.toggleCollaboratorMode",
         "onCommand:coderooms.toggleFollowRoot",
         "onCommand:coderooms.exportRoom",
@@ -92,6 +93,7 @@
         "msgpackr": "^1.11.8",
         "uuid": "^9.0.0",
         "ws": "^8.13.0",
+        "y-protocols": "^1.0.7",
         "yjs": "^13.6.30"
     },
     "contributes": {
@@ -111,6 +113,10 @@
             {
                 "command": "coderooms.shareCurrentFile",
                 "title": "CodeRooms: Share Current File"
+            },
+            {
+                "command": "coderooms.shareWorkspace",
+                "title": "CodeRooms: Share Entire Workspace"
             },
             {
                 "command": "coderooms.toggleCollaboratorMode",

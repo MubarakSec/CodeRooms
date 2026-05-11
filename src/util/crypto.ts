@@ -68,6 +68,46 @@ export function decrypt(payload: EncryptedPayload, key: Buffer): string | null {
   }
 }
 
+export function encryptBinary(plaintext: Uint8Array, key: Buffer): Uint8Array {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  
+  let encrypted = cipher.update(plaintext);
+  encrypted = Buffer.concat([encrypted, cipher.final()]);
+  
+  const authTag = cipher.getAuthTag();
+  
+  // Format: [12 bytes IV] [16 bytes AuthTag] [Ciphertext]
+  return Buffer.concat([iv, authTag, encrypted]);
+}
+
+/**
+ * Decrypts binary data using AES-256-GCM
+ * @param payload Encrypted binary payload [12 IV + 16 AuthTag + Ciphertext]
+ * @param key Encryption key (32 bytes)
+ * @returns Decrypted plaintext or null on failure
+ */
+export function decryptBinary(payload: Uint8Array, key: Buffer): Uint8Array | null {
+  try {
+    if (payload.length < 28) return null;
+    
+    const buf = Buffer.from(payload);
+    const iv = buf.subarray(0, 12);
+    const authTag = buf.subarray(12, 28);
+    const encrypted = buf.subarray(28);
+    
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(authTag);
+    
+    let decrypted = decipher.update(encrypted);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    
+    return decrypted;
+  } catch (error) {
+    return null;
+  }
+}
+
 /**
  * Generates a random passphrase for a room using a 256-word list and 6 words (~48 bits entropy)
  * @returns Random passphrase string

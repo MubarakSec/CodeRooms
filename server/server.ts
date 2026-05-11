@@ -692,6 +692,9 @@ function handleMessage(context: ConnectionContext, message: unknown): void {
     case 'participantActivity':
       handleParticipantActivity(context, message);
       break;
+    case 'awarenessUpdate':
+      handleAwarenessUpdate(context, message);
+      break;
     case 'chatSend':
       handleChatSend(context, message);
       break;
@@ -1630,6 +1633,33 @@ function handleRootCursor(
     uri: message.uri,
     position: message.position
   }, context.ws);
+}
+
+function handleAwarenessUpdate(
+  context: ConnectionContext,
+  message: Extract<ClientToServerMessage, { type: 'awarenessUpdate' }>
+): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) {
+    return;
+  }
+  
+  // Rate limit awareness updates per doc/user
+  const cursorKey = `${room.roomId}:${context.userId}`;
+  if (cursorLimiter.isBlocked(cursorKey)) {
+    return;
+  }
+  cursorLimiter.recordFailure(cursorKey);
+
+  broadcast(
+    room,
+    {
+      type: 'awarenessUpdate',
+      docId: message.docId,
+      update: message.update
+    },
+    context.ws
+  );
 }
 
 function handleParticipantActivity(

@@ -2,13 +2,14 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { TextDocumentChangeEvent, workspace } from 'vscode';
 import * as Y from 'yjs';
+import { Awareness, encodeAwarenessUpdate, applyAwarenessUpdate } from 'y-protocols/awareness';
 import { v4 as uuidv4 } from 'uuid';
 import { ClientToServerMessage, Position, ServerToClientMessage, Suggestion, TextPatch } from '../connection/MessageTypes';
 import { RoomState } from './RoomState';
 import { RoomStorage } from './RoomStorage';
 import { logger } from '../util/logger';
 import { getDocumentResyncNotice } from '../util/roomNotices';
-import { encrypt, decrypt } from '../util/crypto';
+import { encryptBinary, decryptBinary } from '../util/crypto';
 
 type ShareDocumentMessage = Extract<ServerToClientMessage, { type: 'shareDocument' }>;
 type FullDocumentSyncMessage = Extract<ServerToClientMessage, { type: 'fullDocumentSync' }>;
@@ -25,6 +26,7 @@ interface TrackedDocument {
   fileName?: string;
   languageId?: string;
   yDoc?: Y.Doc;
+  awareness?: Awareness;
 }
 
 export class DocumentSync {
@@ -61,13 +63,37 @@ export class DocumentSync {
   constructor(
     private readonly roomState: RoomState,
     private readonly storage: RoomStorage,
-    private readonly sendMessage: (message: ClientToServerMessage) => void
+    private readonly sendMessage: (message: ClientToServerMessage) => void,
+    private readonly onCursorUpdate?: (docId: string, userId: string, userName: string, uri: string, position: Position, selections?: { start: Position; end: Position }[]) => void
   ) {
     this.disposables.push(
       workspace.onDidChangeTextDocument(this.onDidChangeTextDocument, this),
       workspace.onDidCloseTextDocument(this.onDidCloseTextDocument, this),
       this.sharedDocEmitter
     );
+  }
+
+  applyAwarenessUpdate(docId: string, update: Uint8Array): void {
+    const tracked = this.documents.get(docId);
+    if (!tracked || !tracked.awareness) {
+      return;
+    }
+    applyAwarenessUpdate(tracked.awareness, update, 'remote');
+  }
+
+  updateLocalAwareness(docId: string, position: Position, selections: { start: Position; end: Position }[]): void {
+    const tracked = this.documents.get(docId);
+    if (!tracked || !tracked.awareness || !tracked.sharedDocument) {
+      return;
+    }
+    
+    tracked.awareness.setLocalStateField('cursor', {
+      position,
+      selections,
+      uri: tracked.sharedDocument.uri.toString(),
+      userName: this.roomState.getDisplayName() ?? 'Unknown',
+      userId: this.roomState.getUserId() ?? 'unknown'
+    });
   }
 
   dispose(): void {
@@ -110,6 +136,37 @@ export class DocumentSync {
     const yText = yDoc.getText('text');
     yText.insert(0, text);
 
+    const awareness = new Awareness(yDoc);
+    awareness.on('update', ({ added, updated, removed }: any) => {
+      const changedClients = added.concat(updated, removed);
+      const update = encodeAwarenessUpdate(awareness, changedClients);
+      const currentRoomId = this.getEffectiveRoomId();
+      if (currentRoomId) {
+        this.sendMessage({
+          type: 'awarenessUpdate',
+          roomId: currentRoomId,
+          docId,
+          update
+        });
+      }
+    });
+
+    awareness.on('change', () => {
+      const state = awareness.getStates();
+      for (const [clientId, userState] of state.entries()) {
+        if (clientId !== awareness.clientID && userState.cursor && this.onCursorUpdate) {
+          this.onCursorUpdate(
+            docId,
+            userState.cursor.userId,
+            userState.cursor.userName,
+            userState.cursor.uri,
+            userState.cursor.position,
+            userState.cursor.selections
+          );
+        }
+      }
+    });
+
     const tracked: TrackedDocument = {
       docId,
       uri: document.uri,
@@ -119,7 +176,8 @@ export class DocumentSync {
       sharedDocument: document,
       fileName: this.fileNameFromUri(document.uri),
       languageId: document.languageId,
-      yDoc
+      yDoc,
+      awareness
     };
 
     this.pendingShareDocs.set(docId, {
@@ -135,9 +193,9 @@ export class DocumentSync {
     this.registerLocalMapping(docId, document.uri);
     this.roomState.setActiveSharedDocLabel(tracked.fileName);
 
-    const yjsState = Buffer.from(Y.encodeStateAsUpdate(yDoc)).toString('base64');
+    const yjsState = Y.encodeStateAsUpdate(yDoc);
     const e2eKey = this.roomState.getE2EKey();
-    const encryptedYjsState = e2eKey ? encrypt(yjsState, e2eKey) : yjsState;
+    const encryptedYjsState = e2eKey ? encryptBinary(yjsState, e2eKey) : yjsState;
 
     this.sendMessage({
       type: 'shareDocument',
@@ -148,7 +206,7 @@ export class DocumentSync {
       languageId: document.languageId,
       text,
       version: tracked.version,
-      yjsState: JSON.stringify(encryptedYjsState)
+      yjsState: encryptedYjsState
     });
 
     this.emitSharedDocChanged();
@@ -392,10 +450,9 @@ export class DocumentSync {
       if (message.yjsState) {
         try {
           const e2eKey = this.roomState.getE2EKey();
-          const encrypted = JSON.parse(message.yjsState);
-          const yjsState = e2eKey ? decrypt(encrypted, e2eKey) : message.yjsState;
+          const yjsState = e2eKey ? decryptBinary(message.yjsState, e2eKey) : message.yjsState;
           if (yjsState) {
-            Y.applyUpdate(yDoc, Buffer.from(yjsState, 'base64'));
+            Y.applyUpdate(yDoc, yjsState);
           }
         } catch (e) {
           logger.error(`Failed to restore Yjs state for docId=${message.docId}: ${String(e)}`);
@@ -406,6 +463,37 @@ export class DocumentSync {
         yDoc.getText('text').insert(0, message.text);
       }
 
+      const awareness = new Awareness(yDoc);
+      awareness.on('update', ({ added, updated, removed }: any) => {
+        const changedClients = added.concat(updated, removed);
+        const update = encodeAwarenessUpdate(awareness, changedClients);
+        const currentRoomId = this.getEffectiveRoomId();
+        if (currentRoomId) {
+          this.sendMessage({
+            type: 'awarenessUpdate',
+            roomId: currentRoomId,
+            docId: message.docId,
+            update
+          });
+        }
+      });
+
+      awareness.on('change', () => {
+        const state = awareness.getStates();
+        for (const [clientId, userState] of state.entries()) {
+          if (clientId !== awareness.clientID && userState.cursor && this.onCursorUpdate) {
+            this.onCursorUpdate(
+              message.docId,
+              userState.cursor.userId,
+              userState.cursor.userName,
+              userState.cursor.uri,
+              userState.cursor.position,
+              userState.cursor.selections
+            );
+          }
+        }
+      });
+
       const tracked: TrackedDocument = {
         docId: message.docId,
         uri: pendingShare?.uri ?? storageUri,
@@ -415,7 +503,8 @@ export class DocumentSync {
         fileName: message.fileName,
         languageId: message.languageId,
         sharedDocument: pendingShare?.sharedDocument,
-        yDoc
+        yDoc,
+        awareness
       };
 
       this.documents.set(message.docId, tracked);
@@ -469,9 +558,9 @@ export class DocumentSync {
       logger.warn('Unable to fulfill full sync request because document is unavailable.');
       return;
     }
-    const yjsState = Buffer.from(Y.encodeStateAsUpdate(tracked.yDoc!)).toString('base64');
+    const yjsState = Y.encodeStateAsUpdate(tracked.yDoc!);
     const e2eKey = this.roomState.getE2EKey();
-    const encryptedYjsState = e2eKey ? encrypt(yjsState, e2eKey) : yjsState;
+    const encryptedYjsState = e2eKey ? encryptBinary(yjsState, e2eKey) : yjsState;
 
     this.sendMessage({
       type: 'fullDocumentSync',
@@ -479,7 +568,7 @@ export class DocumentSync {
       docId: message.docId,
       text: document.getText(),
       version: tracked.version,
-      yjsState: JSON.stringify(encryptedYjsState)
+      yjsState: encryptedYjsState
     });
   }
 
@@ -489,7 +578,7 @@ export class DocumentSync {
     this.removeTrackedDocument(message.documentId);
   }
 
-  async applyRemoteChange(docId: string, patch: TextPatch, version: number, yjsUpdate?: string): Promise<void> {
+  async applyRemoteChange(docId: string, patch: TextPatch, version: number, yjsUpdate?: Uint8Array): Promise<void> {
     const tracked = this.documents.get(docId);
     if (!tracked) {
       logger.warn(`Received change for unknown document ${docId}`);
@@ -516,10 +605,9 @@ export class DocumentSync {
     if (yjsUpdate && roomId) {
       try {
         const e2eKey = this.roomState.getE2EKey();
-        const encrypted = JSON.parse(yjsUpdate);
-        const b64Update = e2eKey ? decrypt(encrypted, e2eKey) : yjsUpdate;
+        const b64Update = e2eKey ? decryptBinary(yjsUpdate, e2eKey) : yjsUpdate;
         if (b64Update) {
-          Y.applyUpdate(tracked.yDoc, Buffer.from(b64Update, 'base64'));
+          Y.applyUpdate(tracked.yDoc, b64Update);
           
           const newText = tracked.yDoc.getText('text').toString();
           const edit = new vscode.WorkspaceEdit();
@@ -563,7 +651,7 @@ export class DocumentSync {
     await this.persistVersion(docId, tracked.version);
   }
 
-  async applyFullDocumentSync(docId: string, text: string, version: number, yjsState?: string): Promise<void> {
+  async applyFullDocumentSync(docId: string, text: string, version: number, yjsState?: Uint8Array): Promise<void> {
     let tracked = this.documents.get(docId);
     if (!tracked) {
       tracked = { docId, version: 0, lastSyncedText: '', pendingSnapshot: false };
@@ -572,15 +660,31 @@ export class DocumentSync {
 
     if (yjsState && !tracked.yDoc) {
       tracked.yDoc = new Y.Doc();
+      tracked.awareness = new Awareness(tracked.yDoc);
+      tracked.awareness.on('update', ({ added, updated, removed }: any) => {
+        const changedClients = added.concat(updated, removed);
+        const update = encodeAwarenessUpdate(tracked.awareness!, changedClients);
+        const currentRoomId = this.getEffectiveRoomId();
+        if (currentRoomId) {
+          this.sendMessage({ type: 'awarenessUpdate', roomId: currentRoomId, docId, update });
+        }
+      });
+      tracked.awareness.on('change', () => {
+        const state = tracked.awareness!.getStates();
+        for (const [clientId, userState] of state.entries()) {
+          if (clientId !== tracked.awareness!.clientID && userState.cursor && this.onCursorUpdate) {
+            this.onCursorUpdate(docId, userState.cursor.userId, userState.cursor.userName, userState.cursor.uri, userState.cursor.position, userState.cursor.selections);
+          }
+        }
+      });
     }
 
     if (yjsState && tracked.yDoc) {
       try {
         const e2eKey = this.roomState.getE2EKey();
-        const encrypted = JSON.parse(yjsState);
-        const b64Update = e2eKey ? decrypt(encrypted, e2eKey) : yjsState;
+        const b64Update = e2eKey ? decryptBinary(yjsState, e2eKey) : yjsState;
         if (b64Update) {
-          Y.applyUpdate(tracked.yDoc, Buffer.from(b64Update, 'base64'));
+          Y.applyUpdate(tracked.yDoc, b64Update);
         }
       } catch (e) {
         logger.error(`Failed to apply full Yjs sync for docId=${docId}: ${String(e)}`);
@@ -588,6 +692,23 @@ export class DocumentSync {
     } else if (!tracked.yDoc) {
       tracked.yDoc = new Y.Doc();
       tracked.yDoc.getText('text').insert(0, text);
+      tracked.awareness = new Awareness(tracked.yDoc);
+      tracked.awareness.on('update', ({ added, updated, removed }: any) => {
+        const changedClients = added.concat(updated, removed);
+        const update = encodeAwarenessUpdate(tracked.awareness!, changedClients);
+        const currentRoomId = this.getEffectiveRoomId();
+        if (currentRoomId) {
+          this.sendMessage({ type: 'awarenessUpdate', roomId: currentRoomId, docId, update });
+        }
+      });
+      tracked.awareness.on('change', () => {
+        const state = tracked.awareness!.getStates();
+        for (const [clientId, userState] of state.entries()) {
+          if (clientId !== tracked.awareness!.clientID && userState.cursor && this.onCursorUpdate) {
+            this.onCursorUpdate(docId, userState.cursor.userId, userState.cursor.userName, userState.cursor.uri, userState.cursor.position, userState.cursor.selections);
+          }
+        }
+      });
     }
 
     await this.ensureDocumentIsOpen(docId, docId === this.activeDocumentId);
@@ -1047,9 +1168,8 @@ export class DocumentSync {
     });
 
     if (yUpdate) {
-      const b64Update = Buffer.from(yUpdate).toString('base64');
       const e2eKey = this.roomState.getE2EKey();
-      const encryptedUpdate = e2eKey ? encrypt(b64Update, e2eKey) : b64Update;
+      const encryptedUpdate = e2eKey ? encryptBinary(yUpdate, e2eKey) : yUpdate;
 
       tracked.version += 1;
       // Send a dummy patch for backward compatibility if needed, but primary is yjsUpdate
@@ -1062,7 +1182,7 @@ export class DocumentSync {
         docId,
         version: tracked.version,
         patch,
-        yjsUpdate: JSON.stringify(encryptedUpdate)
+        yjsUpdate: encryptedUpdate
       });
     }
 
