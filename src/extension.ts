@@ -1349,6 +1349,9 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.commands.registerCommand('coderooms.generateInviteToken', generateInviteToken),
+    vscode.commands.registerCommand('coderooms.toggleFocusMode', () => {
+      void vscode.commands.executeCommand('workbench.action.toggleZenMode');
+    }),
     configWatcher
   );
 }

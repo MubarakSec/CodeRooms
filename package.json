@@ -222,6 +222,11 @@
             {
                 "command": "coderooms.ownerActionInfo",
                 "title": "CodeRooms: Owner Action Info"
+            },
+            {
+                "command": "coderooms.toggleFocusMode",
+                "title": "CodeRooms: Toggle Focus Mode",
+                "icon": "$(screen-full)"
             }
         ],
         "configuration": {
@@ -274,6 +279,11 @@
                     "command": "coderooms.sendChatMessage",
                     "when": "view == coderoomsChatView",
                     "group": "navigation@1"
+                },
+                {
+                    "command": "coderooms.toggleFocusMode",
+                    "when": "view == coderoomsParticipants || view == coderoomsPanel",
+                    "group": "navigation"
                 }
             ],
             "view/item/context": [
