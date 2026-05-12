@@ -147,8 +147,8 @@ export function buildReviewHeaderViewModel(isRoot: boolean, pending: number): He
   }
 
   return {
-    label: 'Review',
-    description: `${pending} pending`,
+    label: pending > 0 ? `Review (${pending})` : 'Review',
+    description: pending > 0 ? 'Action needed' : 'Clear',
     tooltipLines: [
       pending === 0
         ? 'No pending suggestions.'

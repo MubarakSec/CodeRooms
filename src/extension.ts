@@ -578,6 +578,11 @@ export function activate(context: vscode.ExtensionContext): void {
         scheduleRefresh();
         break;
       }
+      case 'voiceMute': {
+        roomState.setParticipantMuted(message.userId, message.muted);
+        scheduleRefresh();
+        break;
+      }
       case 'rootCursor': {
         lastRootCursorMessage = message;
         if (followController.isFollowing()) {
@@ -1357,6 +1362,18 @@ export function activate(context: vscode.ExtensionContext): void {
       if (action === 'Open Voice Chat') {
         void vscode.env.openExternal(vscode.Uri.parse(voiceUrl));
       }
+    }),
+    vscode.commands.registerCommand('coderooms.muteVoice', (muted: boolean) => {
+      const roomId = roomState.getRoomId();
+      const userId = roomState.getUserId();
+      if (roomId && userId) {
+        sendClientMessage({ type: 'voiceMute', roomId, userId, muted });
+      }
+    }),
+    vscode.commands.registerCommand('coderooms.leaveVoice', () => {
+      // We can't close the browser tab directly, but we can tell the server
+      // to drop our voice connection, which will trigger the bridge to show "Disconnected".
+      void vscode.window.showInformationMessage('Please close the CodeRooms Voice tab in your browser to stop sharing audio.');
     }),
     vscode.commands.registerCommand('coderooms.generateInviteToken', generateInviteToken),
     vscode.commands.registerCommand('coderooms.toggleFocusMode', () => {

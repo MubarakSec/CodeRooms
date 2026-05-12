@@ -9,6 +9,8 @@ describe('ChatView accessibility markup', () => {
     const chatView = new ChatView({
       onDidChange: () => ({ dispose: () => {} }),
       getMessages: () => []
+    } as any, {
+      onDidChange: () => ({ dispose: () => {} })
     } as any);
 
     const html = (chatView as any).renderHtml() as string;
@@ -25,6 +27,8 @@ describe('ChatView accessibility markup', () => {
     const chatView = new ChatView({
       onDidChange: () => ({ dispose: () => {} }),
       getMessages: () => []
+    } as any, {
+      onDidChange: () => ({ dispose: () => {} })
     } as any);
 
     const html = (chatView as any).renderHtml() as string;

@@ -1,8 +1,12 @@
+import * as vscode from 'vscode';
 import { Participant, Role, RoomMode } from '../connection/MessageTypes';
 
 const PARTICIPANT_ACTIVITY_TTL_MS = 2_000;
 
 export class RoomState {
+  private readonly emitter = new vscode.EventEmitter<void>();
+  readonly onDidChange = this.emitter.event;
+
   private roomId?: string;
   private userId?: string;
   private role?: Role;
@@ -12,6 +16,7 @@ export class RoomState {
   private participantActivity = new Map<string, number>();
   private participantFiles = new Map<string, string>();
   private talkingUsers = new Set<string>();
+  private mutedUsers = new Set<string>();
   private mode?: RoomMode;
   private activeSharedDocLabel?: string;
   private e2eKey?: Buffer;
@@ -27,6 +32,7 @@ export class RoomState {
       this.collaboratorDirectMode = false;
     }
     this.syncCollaboratorMode();
+    this.emitter.fire();
   }
 
   reset(): void {
@@ -40,6 +46,7 @@ export class RoomState {
     this.talkingUsers.clear();
     this.mode = undefined;
     this.activeSharedDocLabel = undefined;
+    this.emitter.fire();
   }
 
   setParticipants(list: Participant[]): void {
@@ -53,6 +60,7 @@ export class RoomState {
       }
     }
     this.syncCollaboratorMode();
+    this.emitter.fire();
   }
 
   addParticipant(participant: Participant): void {
@@ -61,6 +69,7 @@ export class RoomState {
     if (participant.userId === this.userId) {
       this.syncCollaboratorMode();
     }
+    this.emitter.fire();
   }
 
   removeParticipant(userId: string): void {
@@ -71,6 +80,7 @@ export class RoomState {
     this.participantActivity.delete(userId);
     this.participantFiles.delete(userId);
     this.talkingUsers.delete(userId);
+    this.emitter.fire();
   }
 
   updateParticipantRole(userId: string, role: Role): void {
@@ -85,6 +95,7 @@ export class RoomState {
         this.collaboratorDirectMode = false;
       }
     }
+    this.emitter.fire();
   }
 
   updateParticipantMode(userId: string, direct: boolean): void {
@@ -96,6 +107,7 @@ export class RoomState {
     if (userId === this.userId && this.isCollaborator()) {
       this.collaboratorDirectMode = direct;
     }
+    this.emitter.fire();
   }
 
   getRoomId(): string | undefined {
@@ -148,10 +160,12 @@ export class RoomState {
 
   setParticipantActivity(userId: string, at: number): void {
     this.participantActivity.set(userId, at);
+    this.emitter.fire();
   }
 
   setParticipantFile(userId: string, file: string): void {
     this.participantFiles.set(userId, file);
+    this.emitter.fire();
   }
 
   getParticipantFile(userId: string): string | undefined {
@@ -164,10 +178,24 @@ export class RoomState {
     } else {
       this.talkingUsers.delete(userId);
     }
+    this.emitter.fire();
   }
 
   isParticipantTalking(userId: string): boolean {
     return this.talkingUsers.has(userId);
+  }
+
+  setParticipantMuted(userId: string, muted: boolean): void {
+    if (muted) {
+      this.mutedUsers.add(userId);
+    } else {
+      this.mutedUsers.delete(userId);
+    }
+    this.emitter.fire();
+  }
+
+  isParticipantMuted(userId: string): boolean {
+    return this.mutedUsers.has(userId);
   }
 
   isParticipantTyping(userId: string): boolean {

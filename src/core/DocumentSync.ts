@@ -388,6 +388,7 @@ export class DocumentSync {
     });
 
     this.pendingSuggestionPatches.delete(targetDocId);
+    this.activeSuggestionIds.delete(targetDocId);
     await this.revertToSnapshot(targetDocId);
     this.emitSharedDocChanged();
     return true;
@@ -442,7 +443,7 @@ export class DocumentSync {
         message.docId,
         message.fileName,
         message.originalUri,
-        message.text,
+        message.text ?? '',
         message.version
       );
 
@@ -457,10 +458,10 @@ export class DocumentSync {
         } catch (e) {
           logger.error(`Failed to restore Yjs state for docId=${message.docId}: ${String(e)}`);
           // Fallback to text if Yjs fails
-          yDoc.getText('text').insert(0, message.text);
+          yDoc.getText('text').insert(0, message.text ?? '');
         }
       } else {
-        yDoc.getText('text').insert(0, message.text);
+        yDoc.getText('text').insert(0, message.text ?? '');
       }
 
       const awareness = new Awareness(yDoc);
@@ -498,7 +499,7 @@ export class DocumentSync {
         docId: message.docId,
         uri: pendingShare?.uri ?? storageUri,
         version: message.version,
-        lastSyncedText: message.text,
+        lastSyncedText: message.text ?? '',
         pendingSnapshot: false,
         fileName: message.fileName,
         languageId: message.languageId,
@@ -538,7 +539,7 @@ export class DocumentSync {
   }
 
   async handleFullDocumentSync(message: FullDocumentSyncMessage): Promise<void> {
-    await this.applyFullDocumentSync(message.docId, message.text, message.version, message.yjsState);
+    await this.applyFullDocumentSync(message.docId, message.text ?? '', message.version, message.yjsState);
   }
 
   async handleRequestFullSync(message: RequestFullSyncMessage): Promise<void> {
@@ -578,7 +579,7 @@ export class DocumentSync {
     this.removeTrackedDocument(message.documentId);
   }
 
-  async applyRemoteChange(docId: string, patch: TextPatch, version: number, yjsUpdate?: Uint8Array): Promise<void> {
+  async applyRemoteChange(docId: string, patch: TextPatch | undefined, version: number, yjsUpdate?: Uint8Array): Promise<void> {
     const tracked = this.documents.get(docId);
     if (!tracked) {
       logger.warn(`Received change for unknown document ${docId}`);
@@ -623,7 +624,7 @@ export class DocumentSync {
     }
 
     // Fallback to OT if Yjs failed or was missing
-    if (!applied) {
+    if (!applied && patch) {
       applied = await this.applyPatch(document, patch);
     }
 
@@ -838,9 +839,12 @@ export class DocumentSync {
     this.pendingDocChanges.set(docId, queue);
   }
 
+  private activeSuggestionIds = new Map<string, string>();
+
   private async handleSuggestionMode(docId: string, event: TextDocumentChangeEvent): Promise<void> {
-    const roomId = this.roomState.getRoomId();
+    const roomId = this.getEffectiveRoomId();
     const userId = this.roomState.getUserId();
+    const displayName = this.roomState.getDisplayName() ?? 'Collaborator';
     const tracked = this.documents.get(docId);
     if (!roomId || !userId || !tracked) {
       return;
@@ -853,8 +857,28 @@ export class DocumentSync {
 
     this.sendTypingActivity();
 
+    let suggestionId = this.activeSuggestionIds.get(docId);
+    if (!suggestionId) {
+      suggestionId = uuidv4();
+      this.activeSuggestionIds.set(docId, suggestionId);
+    }
+
+    // Even in real-time mode, we keep a local queue for the "Send" command 
+    // but we'll also broadcast it immediately as a 'suggestion' update.
     const existing = this.pendingSuggestionPatches.get(docId) ?? [];
     this.pendingSuggestionPatches.set(docId, existing.concat(patches));
+
+    this.sendMessage({
+      type: 'suggestion',
+      roomId,
+      docId,
+      suggestionId,
+      patches, // Just send the new patches
+      authorId: userId,
+      authorName: displayName,
+      createdAt: Date.now()
+    });
+
     this.emitSharedDocChanged();
   }
 
@@ -1197,7 +1221,7 @@ export class DocumentSync {
       return;
     }
     this.pendingFullSyncs.delete(docId);
-    await this.applyFullDocumentSync(docId, queued.text, queued.version);
+    await this.applyFullDocumentSync(docId, queued.text ?? '', queued.version);
   }
 
   private clearPendingSnapshotTimer(docId: string): void {

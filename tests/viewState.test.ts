@@ -64,8 +64,8 @@ describe('ui view state helpers', () => {
 
     expect(people.description).toBe('3 people');
     expect(people.tooltipLines).toEqual(['Owners: 1', 'Collaborators: 1', 'Viewers: 1']);
-    expect(review.label).toBe('Review');
-    expect(review.description).toBe('2 pending');
+    expect(review.label).toBe('Review (2)');
+    expect(review.description).toBe('Action needed');
   });
 
   it('builds concise collaborator status bar state with tooltip details', () => {

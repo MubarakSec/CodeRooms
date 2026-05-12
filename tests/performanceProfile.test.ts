@@ -212,6 +212,7 @@ function createParticipantsView(scenario: RoomScaleScenario) {
     getActiveSharedDocLabel: () => documents[0]?.fileName,
     getParticipants: () => participants,
     isParticipantTyping: (userId: string) => Number(userId.split('-')[1]) % 5 === 0,
+    isParticipantTalking: (userId: string) => Number(userId.split('-')[1]) % 7 === 0,
     getParticipantFile: (userId: string) => documents[(Number(userId.split('-')[1]) - 1) % documents.length]?.fileName,
     isRoot: () => true,
     getUserId: () => 'user-1'

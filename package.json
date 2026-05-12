@@ -284,6 +284,31 @@
                     "command": "coderooms.toggleFocusMode",
                     "when": "view == coderoomsParticipants || view == coderoomsPanel",
                     "group": "navigation"
+                },
+                {
+                    "command": "coderooms.copyRoomId",
+                    "when": "view == coderoomsPanel && coderooms:inRoom",
+                    "group": "navigation@1"
+                },
+                {
+                    "command": "coderooms.joinVoice",
+                    "when": "view == coderoomsPanel && coderooms:inRoom",
+                    "group": "navigation@2"
+                },
+                {
+                    "command": "coderooms.startAsRoot",
+                    "when": "view == coderoomsPanel && !coderooms:inRoom",
+                    "group": "navigation"
+                },
+                {
+                    "command": "coderooms.joinRoom",
+                    "when": "view == coderoomsPanel && !coderooms:inRoom",
+                    "group": "navigation"
+                },
+                {
+                    "command": "coderooms.quickSettings",
+                    "when": "view == coderoomsPanel && coderooms:inRoom",
+                    "group": "navigation@3"
                 }
             ],
             "view/item/context": [

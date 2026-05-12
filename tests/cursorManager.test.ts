@@ -118,16 +118,16 @@ describe('CursorManager', () => {
     manager.updateCursor('u1', 'Alice', 'file:///test.ts', { line: 0, character: 5 });
     vi.runAllTimers();
 
-    expect(setDecorations).toHaveBeenCalledTimes(2);
+    expect(setDecorations).toHaveBeenCalledTimes(3);
 
     manager.updateCursor('u1', 'Alice', 'file:///test.ts', { line: 0, character: 5 });
     vi.runAllTimers();
 
-    expect(setDecorations).toHaveBeenCalledTimes(2);
+    expect(setDecorations).toHaveBeenCalledTimes(3);
 
     manager.updateCursor('u1', 'Alice', 'file:///test.ts', { line: 0, character: 6 });
     vi.runAllTimers();
 
-    expect(setDecorations).toHaveBeenCalledTimes(3);
+    expect(setDecorations).toHaveBeenCalledTimes(4);
   });
 });

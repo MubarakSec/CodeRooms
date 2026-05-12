@@ -326,7 +326,8 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
       mode: this.roomState.getRoomMode()
     });
     const icon = roomId ? roleIcon(role) : new vscode.ThemeIcon('rocket');
-    const header = new BlockItem(Block.Session, presentation.label, presentation.description, icon);
+    const collapsibleState = roomId ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded;
+    const header = new BlockItem(Block.Session, presentation.label, presentation.description, icon, collapsibleState);
 
     const md = new vscode.MarkdownString(
       presentation.tooltipLines.map(line => escapeMarkdown(line)).join('\n\n')

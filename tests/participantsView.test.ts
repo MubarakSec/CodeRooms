@@ -70,6 +70,7 @@ function createDependencies() {
     getActiveSharedDocLabel: () => 'main.ts',
     getParticipants: () => [{ userId: 'u1', displayName: 'Alice', role: 'root' as const }],
     isParticipantTyping: () => false,
+    isParticipantTalking: () => false,
     getParticipantFile: () => undefined,
     isRoot: () => true
   } as any;

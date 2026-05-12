@@ -11,6 +11,7 @@ export class ChatView implements vscode.WebviewViewProvider {
 
   constructor(private readonly chatManager: ChatManager, private readonly roomState: RoomState) {
     this.chatManager.onDidChange(() => this.schedulePostMessages());
+    this.roomState.onDidChange(() => this.schedulePostPresence());
   }
 
   focusInput(): void {
@@ -39,8 +40,15 @@ export class ChatView implements vscode.WebviewViewProvider {
       if (message?.type === 'voice') {
         void vscode.commands.executeCommand('coderooms.joinVoice');
       }
+      if (message?.type === 'voiceMute') {
+        void vscode.commands.executeCommand('coderooms.muteVoice', message.muted);
+      }
+      if (message?.type === 'voiceLeave') {
+        void vscode.commands.executeCommand('coderooms.leaveVoice');
+      }
     });
     this.schedulePostMessages();
+    this.schedulePostPresence();
   }
 
   private schedulePostMessages(): void {
@@ -51,6 +59,53 @@ export class ChatView implements vscode.WebviewViewProvider {
       this.postTimer = undefined;
       this.postMessages();
     }, 0);
+  }
+
+  private presenceTimer?: NodeJS.Timeout;
+  private schedulePostPresence(): void {
+    if (!this.view || this.presenceTimer) {
+      return;
+    }
+    this.presenceTimer = setTimeout(() => {
+      this.presenceTimer = undefined;
+      this.postPresence();
+    }, 100);
+  }
+
+  private postPresence(): void {
+    if (!this.view) {
+      return;
+    }
+    const myUserId = this.roomState.getUserId();
+    const typing: string[] = [];
+    const talking: string[] = [];
+    let localInVoice = false;
+    let localMuted = false;
+
+    for (const p of this.roomState.getParticipants()) {
+      if (p.userId === myUserId) {
+        localInVoice = this.roomState.isParticipantTalking(p.userId); // Still rough proxy
+        localMuted = this.roomState.isParticipantMuted(p.userId);
+      }
+      if (p.userId !== myUserId && this.roomState.isParticipantTyping(p.userId)) {
+        typing.push(p.displayName);
+      }
+      if (this.roomState.isParticipantTalking(p.userId)) {
+        talking.push(p.userId);
+      }
+    }
+
+    if (myUserId && this.roomState.isParticipantTalking(myUserId)) {
+        localInVoice = true;
+    }
+
+    this.view.webview.postMessage({
+      type: 'presence',
+      typing,
+      talking,
+      localInVoice,
+      localMuted
+    });
   }
 
   private postMessages(): void {
@@ -150,7 +205,18 @@ export class ChatView implements vscode.WebviewViewProvider {
       }
       .voice-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
       .voice-btn:active { transform: translateY(0); }
+      .voice-btn.active { background: var(--vscode-charts-green); }
+      .voice-btn.muted { background: var(--vscode-charts-red); }
       .voice-btn svg { width: 12px; height: 12px; fill: currentColor; }
+      
+      .voice-controls { display: none; align-items: center; gap: 4px; margin-left: 12px; }
+      .voice-controls.visible { display: flex; }
+      .voice-control-btn {
+        background: var(--bubble-other); color: var(--text-main); border: 1px solid var(--border);
+        border-radius: 4px; padding: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+      }
+      .voice-control-btn:hover { background: var(--sys-bg); }
+      .voice-control-btn svg { width: 14px; height: 14px; fill: currentColor; }
 
       .chat-hint-row { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
       .chat-hint { font-size: 11px; color: var(--text-dim); }
@@ -235,6 +301,20 @@ export class ChatView implements vscode.WebviewViewProvider {
       .bubble a { color: inherit; text-decoration: underline; opacity: 0.9; }
       .bubble a:hover { opacity: 1; }
 
+      /* Talking State */
+      .chat-row.talking .bubble {
+        box-shadow: 0 0 8px var(--vscode-charts-green);
+        border-color: var(--vscode-charts-green);
+      }
+
+      /* Typing Indicator */
+      .typing-indicator {
+        padding: 4px 16px; font-size: 11px; color: var(--text-dim);
+        font-style: italic; min-height: 18px; display: none;
+        animation: fadeIn 0.2s;
+      }
+      .typing-indicator.visible { display: block; }
+
       /* System Message */
       .system-row {
         align-self: center; margin: 4px 0;
@@ -301,6 +381,14 @@ export class ChatView implements vscode.WebviewViewProvider {
             <button id="chatHintDismiss" class="chat-hint-dismiss" aria-label="Dismiss chat input tip" title="Dismiss chat input tip">Dismiss</button>
           </div>
         </div>
+        <div id="voiceControls" class="voice-controls">
+          <button id="muteBtn" class="voice-control-btn" title="Mute/Unmute">
+            <svg id="muteIcon" viewBox="0 0 16 16"><path d="M8 11a3 3 0 0 0 3-3V3a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M13 8a5 5 0 0 1-10 0H2a6 6 0 0 0 12 0h-1z"/><path d="M8 14a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/></svg>
+          </button>
+          <button id="leaveVoiceBtn" class="voice-control-btn" title="Leave Voice Channel">
+            <svg viewBox="0 0 16 16"><path d="M15.7 1.3l-.7-.7L8 7.6 1 1.3l-.7.7L6.6 8l-6.3 7 1 1.3 7-6.3 7 6.3.7-.7-6.4-7.3 6.4-7z"/></svg>
+          </button>
+        </div>
         <button id="voiceBtn" class="voice-btn" title="Join Voice Channel">
           <svg viewBox="0 0 16 16"><path d="M8 11a3 3 0 0 0 3-3V3a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M13 8a5 5 0 0 1-10 0H2a6 6 0 0 0 12 0h-1z"/><path d="M8 14a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/></svg>
           Join Voice
@@ -319,6 +407,8 @@ export class ChatView implements vscode.WebviewViewProvider {
         <div id="messageList" aria-label="CodeRooms chat transcript"></div>
       </div>
       
+      <div id="typingIndicator" class="typing-indicator"></div>
+
       <button id="scrollBtn" class="scroll-anchor" aria-label="Scroll chat to the latest messages">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11.5L2.5 6l1-.9L8 9.5l4.5-4.4 1 .9z"/></svg>
       </button>
@@ -342,6 +432,7 @@ export class ChatView implements vscode.WebviewViewProvider {
       const sendBtn = document.getElementById('sendBtn');
       const scrollBtn = document.getElementById('scrollBtn');
       const chatHintRow = document.getElementById('chatHintRow');
+      const typingIndicator = document.getElementById('typingIndicator');
 
       let autoScroll = true;
       let viewState = vscode.getState() || {};
@@ -415,6 +506,7 @@ export class ChatView implements vscode.WebviewViewProvider {
 
           const row = document.createElement('div');
           row.className = 'chat-row ' + (isSelf ? 'self' : 'other');
+          row.dataset.userId = msg.fromUserId;
           
           if (!withinGroup) {
             const meta = document.createElement('div');
@@ -456,6 +548,12 @@ export class ChatView implements vscode.WebviewViewProvider {
       });
 
       const voiceBtn = document.getElementById('voiceBtn');
+      const voiceControls = document.getElementById('voiceControls');
+      const muteBtn = document.getElementById('muteBtn');
+      const leaveVoiceBtn = document.getElementById('leaveVoiceBtn');
+
+      let isMuted = false;
+      let inVoice = false;
 
       scrollBtn.addEventListener('click', () => {
         panel.scrollTop = panel.scrollHeight;
@@ -463,6 +561,16 @@ export class ChatView implements vscode.WebviewViewProvider {
 
       voiceBtn.addEventListener('click', () => {
         vscode.postMessage({ type: 'voice' });
+      });
+
+      muteBtn.addEventListener('click', () => {
+        isMuted = !isMuted;
+        muteBtn.classList.toggle('muted', isMuted);
+        vscode.postMessage({ type: 'voiceMute', muted: isMuted });
+      });
+
+      leaveVoiceBtn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'voiceLeave' });
       });
 
       document.getElementById('chatHintDismiss').addEventListener('click', () => {
@@ -483,10 +591,50 @@ export class ChatView implements vscode.WebviewViewProvider {
           if (event.data.myUserId) myUserId = event.data.myUserId;
           renderMessages(event.data.payload, event.data.append, event.data.dropHeadCount || 0);
         }
+        if (event.data?.type === 'presence') {
+          updatePresence(event.data.typing, event.data.talking);
+        }
         if (event.data?.type === 'focus') {
           input.focus();
         }
       });
+
+      function updatePresence(typing, talking, localInVoice, localMuted) {
+        // Update typing indicator
+        if (typing && typing.length > 0) {
+          const names = typing.length > 2 ? 'Several people' : typing.join(' and ');
+          typingIndicator.textContent = names + (typing.length === 1 ? ' is typing...' : ' are typing...');
+          typingIndicator.classList.add('visible');
+        } else {
+          typingIndicator.classList.remove('visible');
+        }
+
+        // Update talking state in chat rows
+        const rows = document.querySelectorAll('.chat-row');
+        const talkingSet = new Set(talking || []);
+        rows.forEach(row => {
+           const userId = row.dataset.userId;
+           if (talkingSet.has(userId)) {
+             row.classList.add('talking');
+           } else {
+             row.classList.remove('talking');
+           }
+        });
+
+        // Update voice UI
+        if (localInVoice !== undefined) {
+           inVoice = localInVoice;
+           voiceControls.classList.toggle('visible', inVoice);
+           voiceBtn.style.display = inVoice ? 'none' : 'flex';
+        }
+        if (localMuted !== undefined) {
+           isMuted = localMuted;
+           muteBtn.classList.toggle('muted', isMuted);
+           muteIcon.innerHTML = isMuted 
+             ? '<path d="M8 11a3 3 0 0 0 3-3V3a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M13 8a5 5 0 0 1-10 0H2a6 6 0 0 0 12 0h-1z"/><path d="M1 1l14 14"/>'
+             : '<path d="M8 11a3 3 0 0 0 3-3V3a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M13 8a5 5 0 0 1-10 0H2a6 6 0 0 0 12 0h-1z"/><path d="M8 14a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/>';
+        }
+      }
 
       form.addEventListener('submit', event => {
         event.preventDefault();

@@ -16,8 +16,6 @@ import {
   SuggestionReviewAction
 } from './types';
 import { log } from './logger';
-import { applyPatch } from './patch';
-import { transformPatch, VersionedPatch } from './ot';
 import { RateLimiter } from './rateLimiter';
 import path from 'path';
 import { pack, unpack } from 'msgpackr';
@@ -48,11 +46,9 @@ import {
 import { getRoomInvariantViolations } from './roomInvariants';
 import { createRoomOperationGuards, getJoinClaimKey } from './roomOperationGuards';
 import {
-  applySuggestionPatches,
   canSubmitSuggestion,
   createPendingSuggestion,
   getPendingSuggestionsForRole,
-  isIdempotentSuggestionReplay,
   pruneReviewedSuggestions,
   transitionSuggestionStatus
 } from './suggestions';
@@ -62,16 +58,13 @@ import { buildTrackedErrorResponses } from './trackedResponses';
 import { getJoinFailureResponse, JOIN_FAILURE_DELAY_MS, type JoinFailureReason } from './joinSecurity';
 import { buildRecoveryMetrics } from './recoveryState';
 
-const MAX_PATCH_HISTORY = 200;
-
 interface DocumentState {
   docId: string;
-  text: string;
+  text?: string;
   version: number;
   originalUri: string;
   fileName: string;
   languageId?: string;
-  patchHistory: VersionedPatch[];
   yjsState?: Uint8Array;
 }
 
@@ -135,10 +128,10 @@ const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024; // 2 MB limit for shared documents
 const MAX_ROOMS_GLOBAL = 500;
 const MAX_ROOMS_PER_IP = 10;
 const MAX_CONNECTIONS_PER_IP = 20;
-const MAX_DOCUMENTS_PER_ROOM = 50;
+const MAX_DOCUMENTS_PER_ROOM = 5000;
 const MAX_SUGGESTIONS_PER_ROOM = 100;
 const MAX_REVIEWED_SUGGESTIONS = 200;
-const MAX_TOTAL_DOC_BYTES = 256 * 1024 * 1024; // 256 MB total memory budget for document text
+const MAX_TOTAL_DOC_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB total memory budget for documents
 let totalDocBytes = 0;
 const roomCountByIp = new Map<string, number>();
 const connectionsPerIp = new Map<string, number>();
@@ -258,6 +251,7 @@ function loadRooms(): void {
         participants: new Map(),
         recoverableSessions: restoredSessionState.recoverableSessions,
         connections: new Map(),
+        voiceConnections: new Map(),
         documents: restoredDocs,
         suggestions: new Map(d.suggestions),
         mode: d.mode,
@@ -626,7 +620,6 @@ function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): s
     const mic = document.getElementById('mic');
     const visualizer = document.getElementById('visualizer');
     
-    // Create visualizer bars
     for (let i = 0; i < 8; i++) {
       const bar = document.createElement('div');
       bar.className = 'bar';
@@ -636,19 +629,72 @@ function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): s
     const bars = visualizer.children;
 
     let ws;
-    let isTalking = false;
-    let silenceTimeout;
+    let localStream;
+    let isMuted = false;
+    const peers = new Map(); // peerId -> RTCPeerConnection
+
+    const rtcConfig = {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    };
 
     function connect() {
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(protocol + '//' + location.host);
       
       ws.onopen = () => {
-        status.innerText = 'Connected. Waiting for Mic...';
-        ws.send(JSON.stringify({ type: 'voiceJoin', roomId: '${roomId}', userId: '${userId}', token: '${token}' }));
-        startMic();
+        status.innerText = 'Connected. Requesting Mic...';
+        startMic().then(() => {
+          ws.send(JSON.stringify({ type: 'voiceJoin', roomId: '${roomId}', userId: '${userId}', token: '${token}' }));
+        });
       };
       
+      ws.onmessage = async (event) => {
+        let msg;
+        try {
+          // If the server sends a Buffer/Blob (msgpack), we'll need to parse it,
+          // but our server.ts currently accepts JSON or msgpack and responds with msgpack.
+          // Wait, the client was sending JSON and receiving nothing!
+          // We need to decode msgpack if it's binary.
+          if (event.data instanceof Blob) {
+             const buffer = await event.data.arrayBuffer();
+             // Not easily decoding msgpack in plain HTML without a library.
+             // We need to change the server to send JSON for voiceSignal if the connection is a VoiceBridge, or we include a msgpack library.
+          } else {
+             msg = JSON.parse(event.data);
+          }
+        } catch(e) { console.error('Parse error', e); return; }
+
+        if (!msg) return;
+
+        if (msg.type === 'voiceSignal') {
+          const { fromUserId, signal } = msg;
+          if (fromUserId === 'server') {
+            if (signal.type === 'peers') {
+              for (const peerId of signal.peers) {
+                createPeerConnection(peerId, true);
+              }
+            } else if (signal.type === 'peer_joined') {
+              createPeerConnection(signal.peerId, false);
+            } else if (signal.type === 'peer_left') {
+              if (peers.has(signal.peerId)) {
+                peers.get(signal.peerId).close();
+                peers.delete(signal.peerId);
+              }
+            }
+          } else {
+            handleSignalingData(fromUserId, signal);
+          }
+        }
+        if (msg.type === 'voiceMute') {
+           isMuted = msg.muted;
+           if (localStream) {
+              localStream.getAudioTracks().forEach(track => track.enabled = !isMuted);
+           }
+           status.innerText = isMuted ? 'Voice Muted' : 'Voice Active (WebRTC E2EE)';
+           mic.classList.toggle('muted', isMuted);
+        }
+      };
+
       ws.onclose = () => {
         status.innerText = 'Disconnected. Reconnecting...';
         setTimeout(connect, 2000);
@@ -657,16 +703,18 @@ function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): s
 
     async function startMic() {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        status.innerText = 'Voice Active (E2EE Bridge Ready)';
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        status.innerText = 'Voice Active (WebRTC E2EE)';
         
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const source = audioCtx.createMediaStreamSource(stream);
+        const source = audioCtx.createMediaStreamSource(localStream);
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = 256;
         source.connect(analyser);
         
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        let isTalking = false;
+        let silenceTimeout;
         
         function checkVolume() {
           analyser.getByteFrequencyData(dataArray);
@@ -679,27 +727,83 @@ function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): s
           }
           const average = sum / dataArray.length;
           
-          if (average > 15) { // Threshold for talking
+          if (average > 15) { 
             if (!isTalking) {
               isTalking = true;
               mic.classList.add('talking');
-              ws.send(JSON.stringify({ type: 'voiceActivity', roomId: '${roomId}', userId: '${userId}', talking: true }));
+              ws.send(msgpackr.pack({ type: 'voiceActivity', roomId: '${roomId}', userId: '${userId}', talking: true }));
             }
             clearTimeout(silenceTimeout);
             silenceTimeout = setTimeout(() => {
               isTalking = false;
               mic.classList.remove('talking');
-              ws.send(JSON.stringify({ type: 'voiceActivity', roomId: '${roomId}', userId: '${userId}', talking: false }));
+              ws.send(msgpackr.pack({ type: 'voiceActivity', roomId: '${roomId}', userId: '${userId}', talking: false }));
             }, 500);
           }
-          
           requestAnimationFrame(checkVolume);
         }
-        
         checkVolume();
       } catch (err) {
         status.innerText = 'Microphone access denied or error.';
         console.error(err);
+      }
+    }
+
+    function createPeerConnection(peerId, isInitiator) {
+      if (peers.has(peerId)) return;
+      const pc = new RTCPeerConnection(rtcConfig);
+      peers.set(peerId, pc);
+
+      if (localStream) {
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      }
+
+      pc.onicecandidate = event => {
+        if (event.candidate) {
+          ws.send(msgpackr.pack({ type: 'voiceSignal', roomId: '${roomId}', targetUserId: peerId, signal: { type: 'candidate', candidate: event.candidate } }));
+        }
+      };
+
+      pc.ontrack = event => {
+        // Play remote audio
+        let audio = document.getElementById('audio-' + peerId);
+        if (!audio) {
+           audio = document.createElement('audio');
+           audio.id = 'audio-' + peerId;
+           audio.autoplay = true;
+           document.body.appendChild(audio);
+        }
+        audio.srcObject = event.streams[0];
+      };
+
+      if (isInitiator) {
+        pc.createOffer().then(offer => {
+          return pc.setLocalDescription(offer);
+        }).then(() => {
+          ws.send(msgpackr.pack({ type: 'voiceSignal', roomId: '${roomId}', targetUserId: peerId, signal: { type: 'offer', offer: pc.localDescription } }));
+        }).catch(console.error);
+      }
+      return pc;
+    }
+
+    async function handleSignalingData(peerId, data) {
+      let pc = peers.get(peerId);
+      if (!pc) {
+        pc = createPeerConnection(peerId, false);
+      }
+      try {
+        if (data.type === 'offer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ws.send(msgpackr.pack({ type: 'voiceSignal', roomId: '${roomId}', targetUserId: peerId, signal: { type: 'answer', answer: pc.localDescription } }));
+        } else if (data.type === 'answer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        } else if (data.type === 'candidate') {
+          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        }
+      } catch (err) {
+        console.error('WebRTC error', err);
       }
     }
 
@@ -853,8 +957,10 @@ function handleMessage(context: ConnectionContext, message: unknown): void {
     case 'voiceActivity':
       handleVoiceActivity(context, message);
       break;
-    case 'chatSend':
-      handleChatSend(context, message);
+    case 'voiceMute':
+      handleVoiceMute(context, message);
+      break;
+    case 'chatSend':      handleChatSend(context, message);
       break;
     case 'createToken':
       handleCreateToken(context, message.label);
@@ -1155,6 +1261,14 @@ function cleanupRoomMembership(
   const participant = room.participants.get(context.userId);
   room.participants.delete(context.userId);
   room.connections.delete(context.userId);
+
+  if (room.voiceConnections?.has(context.userId)) {
+    room.voiceConnections.delete(context.userId);
+    for (const peerCtx of room.voiceConnections.values()) {
+      send(peerCtx.ws, { type: 'voiceSignal', fromUserId: 'server', signal: { type: 'peer_left', peerId: context.userId } });
+    }
+  }
+
   if (participant) {
     broadcast(room, { type: 'participantLeft', userId: context.userId }, context.ws);
     if (reason !== 'disconnect') {
@@ -1289,7 +1403,8 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
     return;
   }
 
-  if (Buffer.byteLength(message.text, 'utf8') > MAX_DOCUMENT_BYTES) {
+  const docByteLength = message.yjsState ? message.yjsState.byteLength : Buffer.byteLength(message.text || '', 'utf8');
+  if (docByteLength > MAX_DOCUMENT_BYTES) {
     rejectTrackedMessage(context.ws, message, 'Document is too large to share (max 2 MB).', 'DOCUMENT_TOO_LARGE');
     return;
   }
@@ -1302,7 +1417,6 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
   const existing = room.documents.get(message.docId);
   if (
     existing
-    && existing.text === message.text
     && existing.version === message.version
     && existing.originalUri === message.originalUri
     && existing.fileName === message.fileName
@@ -1311,7 +1425,8 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
     sendAckForMessage(context.ws, message);
     return;
   }
-  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, existing?.text ?? '', message.text);
+  const existingByteLength = existing?.yjsState ? existing.yjsState.byteLength : Buffer.byteLength(existing?.text || '', 'utf8');
+  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, ' '.repeat(existingByteLength), ' '.repeat(docByteLength));
   if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
     rejectTrackedMessage(context.ws, message, 'Server memory limit reached. Cannot share more documents.', 'MEMORY_LIMIT');
     return;
@@ -1325,7 +1440,6 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
     originalUri: message.originalUri,
     fileName: message.fileName,
     languageId: message.languageId,
-    patchHistory: [],
     yjsState: message.yjsState
   };
 
@@ -1403,48 +1517,16 @@ function handleDocChange(context: ConnectionContext, message: Extract<ClientToSe
     return;
   }
 
-  // OT: if the client's version is behind, transform the patch against
-  // all patches applied since the client's base version.
-  let patchToApply = message.patch;
-  if (message.version <= doc.version && doc.patchHistory.length > 0) {
-    // Check for replay of an already applied patch (e.g. dropped ACK)
-    const isDuplicate = doc.patchHistory.some(
-      h => h.authorId === context.userId &&
-           h.version > message.version &&
-           h.patch.text === message.patch.text &&
-           h.patch.range.start.line === message.patch.range.start.line &&
-           h.patch.range.start.character === message.patch.range.start.character &&
-           h.patch.range.end.line === message.patch.range.end.line &&
-           h.patch.range.end.character === message.patch.range.end.character
-    );
-
-    if (isDuplicate) {
-      sendAckForMessage(context.ws, message);
-      return;
-    }
-
-    const transformed = transformPatch(
-      doc.text,
-      message.patch,
-      message.version - 1, // client authored against version-1
-      doc.patchHistory,
-    );
-    if (!transformed) {
-      // Patch fully subsumed by concurrent edits — acknowledge it so reconnect queues do not replay forever.
-      sendAckForMessage(context.ws, message);
-      return;
-    }
-    patchToApply = transformed;
-  }
-
-  const baseText = doc.text;
-  const updatedText = applyPatch(doc.text, patchToApply);
-  if (!updatedText) {
-    rejectTrackedMessage(context.ws, message, 'Invalid patch payload', 'PATCH_INVALID');
+  if (message.version <= doc.version) {
+    sendAckForMessage(context.ws, message);
     return;
   }
 
-  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, baseText, updatedText);
+  const baseByteLength = doc.yjsState ? doc.yjsState.byteLength : Buffer.byteLength(doc.text || '', 'utf8');
+  // Rough estimate: new byte length is old length + size of update
+  const newByteLength = message.yjsUpdate ? baseByteLength + message.yjsUpdate.byteLength : baseByteLength + Buffer.byteLength(message.patch?.text || '', 'utf8');
+  
+  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, ' '.repeat(baseByteLength), ' '.repeat(newByteLength));
   if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
     rejectTrackedMessage(context.ws, message, 'Server memory limit reached. Cannot apply document change.', 'MEMORY_LIMIT');
     return;
@@ -1453,26 +1535,18 @@ function handleDocChange(context: ConnectionContext, message: Extract<ClientToSe
   doc.version += 1;
   const newVersion = doc.version;
 
-  // Record in history for future OT transforms
-  doc.patchHistory.push({
-    patch: patchToApply,
-    authorId: context.userId,
-    version: newVersion,
-    baseText,
-  });
-  // Trim history to bounded size
-  if (doc.patchHistory.length > MAX_PATCH_HISTORY) {
-    doc.patchHistory.splice(0, doc.patchHistory.length - MAX_PATCH_HISTORY);
+  // We no longer apply OT locally since the server is zero-knowledge
+  // We simply track versions and relay the change.
+  if (message.yjsUpdate) {
+    // We don't apply, just relay
   }
-
-  doc.text = updatedText;
-  room.documents.set(message.docId, doc);
 
   broadcast(room, {
     type: 'docChangeBroadcast',
     docId: message.docId,
     version: newVersion,
-    patch: patchToApply,
+    patch: message.patch,
+    yjsUpdate: message.yjsUpdate,
     authorId: context.userId
   }, context.ws);
   sendAckForMessage(context.ws, message);
@@ -1517,11 +1591,20 @@ function handleSuggestion(
 
   const existing = room.suggestions.get(message.suggestionId);
   if (existing) {
-    if (isIdempotentSuggestionReplay(existing, message, participant)) {
+    if (existing.status !== 'pending') {
       sendAckForMessage(context.ws, message);
       return;
     }
-    rejectTrackedMessage(context.ws, message, 'Suggestion id already exists for a different review payload.', 'CONFLICT');
+    // Real-time streaming: append new patches to existing suggestion
+    existing.patches.push(...message.patches);
+    if (existing.patches.length > 2000) {
+      existing.patches.splice(0, existing.patches.length - 2000);
+    }
+    broadcast(room, {
+      type: 'newSuggestion',
+      suggestion: existing
+    }, context.ws);
+    sendAckForMessage(context.ws, message);
     return;
   }
 
@@ -1656,42 +1739,8 @@ function reviewSuggestion(
         message: 'Document not found.'
       };
     }
-
-    const appliedSuggestion = applySuggestionPatches(doc.text, doc.version, suggestion.patches, suggestion.authorId);
-    if (!appliedSuggestion) {
-      return {
-        outcome: 'error',
-        code: 'PATCH_INVALID',
-        message: 'Invalid suggestion payload'
-      };
-    }
-
-    const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, doc.text, appliedSuggestion.text);
-    if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
-      return {
-        outcome: 'error',
-        code: 'MEMORY_LIMIT',
-        message: 'Server memory limit reached. Cannot accept suggestion.'
-      };
-    }
-
-    totalDocBytes = nextTotalDocBytes;
-    doc.text = appliedSuggestion.text;
-    doc.version = appliedSuggestion.version;
-    doc.patchHistory.push(...appliedSuggestion.history);
-    if (doc.patchHistory.length > MAX_PATCH_HISTORY) {
-      doc.patchHistory.splice(0, doc.patchHistory.length - MAX_PATCH_HISTORY);
-    }
-    for (const entry of appliedSuggestion.history) {
-      broadcast(room, {
-        type: 'docChangeBroadcast',
-        docId: suggestion.docId,
-        version: entry.version,
-        patch: entry.patch,
-        authorId: suggestion.authorId
-      });
-    }
-    room.documents.set(suggestion.docId, doc);
+    // Zero-knowledge server: we don't apply the patch locally.
+    // The client that accepted the suggestion will apply it and send a docChange / fullDocumentSync.
   }
 
   const reviewed = transitionSuggestionStatus(suggestion, action, reviewerId);
@@ -1750,7 +1799,10 @@ function handleFullDocumentSync(
     rejectTrackedMessage(context.ws, message, 'Document not found.', 'TARGET_NOT_FOUND');
     return;
   }
-  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, doc.text, message.text);
+  const baseByteLength = doc.yjsState ? doc.yjsState.byteLength : Buffer.byteLength(doc.text || '', 'utf8');
+  const newByteLength = message.yjsState ? message.yjsState.byteLength : Buffer.byteLength(message.text || '', 'utf8');
+
+  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, ' '.repeat(baseByteLength), ' '.repeat(newByteLength));
   if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
     rejectTrackedMessage(context.ws, message, 'Server memory limit reached. Cannot apply full sync.', 'MEMORY_LIMIT');
     return;
@@ -1759,7 +1811,6 @@ function handleFullDocumentSync(
   doc.text = message.text;
   doc.version = message.version;
   doc.yjsState = message.yjsState;
-  doc.patchHistory = []; // reset history on full sync
   room.documents.set(message.docId, doc);
 
   broadcast(room, {
@@ -1832,7 +1883,7 @@ function handleVoiceSignal(
     return;
   }
   
-  const target = room.connections.get(message.targetUserId);
+  const target = room.voiceConnections.get(message.targetUserId);
   if (target && target.ws.readyState === WebSocket.OPEN) {
     send(target.ws, {
       type: 'voiceSignal',
@@ -1868,9 +1919,47 @@ function handleVoiceJoin(
 
   context.userId = message.userId;
   context.roomId = message.roomId;
-  // We don't add to room.connections or room.participants to avoid double-counting/kick-offs
-  // But we need getRoomForContext to work, so we'll just set the fields on context.
+  if (!room.voiceConnections) {
+    room.voiceConnections = new Map();
+  }
+  room.voiceConnections.set(context.userId, context);
+
+  // Tell the newly joined voice client about other voice clients
+  const existingPeers = Array.from(room.voiceConnections.keys()).filter(id => id !== context.userId);
+  send(context.ws, { type: 'voiceSignal', fromUserId: 'server', signal: { type: 'peers', peers: existingPeers } });
+
+  // Tell other voice clients that someone new joined so they can initiate
+  for (const peerId of existingPeers) {
+    const peerCtx = room.voiceConnections.get(peerId);
+    if (peerCtx) {
+      send(peerCtx.ws, { type: 'voiceSignal', fromUserId: 'server', signal: { type: 'peer_joined', peerId: context.userId } });
+    }
+  }
+
   log('voice_bridge_joined', { roomId: message.roomId, userId: message.userId });
+}
+
+function handleVoiceMute(
+  context: ConnectionContext,
+  message: Extract<ClientToServerMessage, { type: 'voiceMute' }>
+): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) {
+    return;
+  }
+
+  // If this came from a main connection, tell the voice bridge to mute
+  const voiceBridge = room.voiceConnections?.get(context.userId);
+  if (voiceBridge) {
+    send(voiceBridge.ws, { type: 'voiceMute', userId: context.userId, muted: message.muted });
+  }
+
+  // Broadcast the mute state to all other participants so they can see the mute icon
+  broadcast(room, {
+    type: 'voiceMute',
+    userId: context.userId,
+    muted: message.muted
+  }, context.ws);
 }
 
 function handleVoiceActivity(

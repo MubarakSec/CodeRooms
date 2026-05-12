@@ -64,6 +64,7 @@ export type ClientToServerMessage =
   | { type: "voiceSignal"; roomId: string; targetUserId: string; signal: any }
   | { type: "voiceJoin"; roomId: string; userId: string; token: string }
   | { type: "voiceActivity"; roomId: string; userId: string; talking: boolean }
+  | { type: "voiceMute"; roomId: string; userId: string; muted: boolean }
   | { type: "createToken"; label?: string };
 
 export type ServerToClientMessage =
@@ -75,13 +76,14 @@ export type ServerToClientMessage =
   | { type: "participantLeft"; userId: string }
   | { type: "roleUpdated"; userId: string; role: Role }
   | { type: "editModeUpdated"; userId: string; isDirectEditMode: boolean }
-  | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text: string; version: number; yjsState?: YjsUpdate }
+  | { type: "shareDocument"; roomId: string; docId: string; originalUri: string; fileName: string; languageId: string; text?: string; version: number; yjsState?: YjsUpdate }
   | { type: "documentUnshared"; roomId: string; documentId: string }
-  | { type: "docChangeBroadcast"; docId: string; version: number; patch: TextPatch; yjsUpdate?: YjsUpdate; authorId: string }
+  | { type: "docChangeBroadcast"; docId: string; version: number; patch?: TextPatch; yjsUpdate?: YjsUpdate; authorId: string }
   | { type: "awarenessUpdate"; docId: string; update: Uint8Array }
   | { type: "voiceSignal"; fromUserId: string; signal: any }
   | { type: "voiceActivity"; roomId: string; userId: string; talking: boolean }
-  | { type: "fullDocumentSync"; roomId: string; docId: string; version: number; text: string; yjsState?: YjsUpdate }
+  | { type: "voiceMute"; userId: string; muted: boolean }
+  | { type: "fullDocumentSync"; roomId: string; docId: string; version: number; text?: string; yjsState?: YjsUpdate }
   | { type: "requestFullSync"; roomId: string; docId: string }
   | { type: "newSuggestion"; suggestion: Suggestion }
   | { type: "suggestionAccepted"; suggestionId: string; docId: string }
