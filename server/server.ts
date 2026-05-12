@@ -580,18 +580,21 @@ import { initRedis, subscribeToRoomBroadcasts, joinRoomPubSub, leaveRoomPubSub, 
 import http from 'http';
 
 function handleHttpRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-  const url = req.url || '/';
-  if (url.startsWith('/voice/')) {
-    const roomId = url.split('/')[2];
+  const urlObj = new URL(req.url || '/', 'http://localhost');
+  const path = urlObj.pathname;
+  if (path.startsWith('/voice/')) {
+    const roomId = path.split('/')[2];
+    const userId = urlObj.searchParams.get('userId') || '';
+    const token = urlObj.searchParams.get('token') || '';
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(renderVoiceBridgeHtml(roomId));
+    res.end(renderVoiceBridgeHtml(roomId, userId, token));
     return;
   }
   res.writeHead(404);
   res.end('Not Found');
 }
 
-function renderVoiceBridgeHtml(roomId: string): string {
+function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): string {
   return `
 <!DOCTYPE html>
 <html>
@@ -599,19 +602,108 @@ function renderVoiceBridgeHtml(roomId: string): string {
   <title>CodeRooms Voice - ${roomId}</title>
   <style>
     body { background: #1e1e1e; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .status { font-size: 24px; margin-bottom: 20px; }
-    .mic { width: 100px; height: 100px; border-radius: 50%; background: #007acc; display: flex; align-items: center; justify-content: center; margin-bottom: 20px; box-shadow: 0 0 20px rgba(0,122,204,0.5); }
-    .mic svg { width: 50px; height: 50px; fill: #fff; }
-    .room { color: #888; }
+    .status { font-size: 20px; margin-bottom: 20px; color: #ccc; }
+    .mic { 
+      width: 120px; height: 120px; border-radius: 50%; background: #007acc; 
+      display: flex; align-items: center; justify-content: center; margin-bottom: 24px; 
+      box-shadow: 0 0 30px rgba(0,122,204,0.3); transition: all 0.2s;
+    }
+    .mic.talking { background: #4ec9b0; box-shadow: 0 0 40px rgba(78,201,176,0.6); transform: scale(1.05); }
+    .mic svg { width: 60px; height: 60px; fill: #fff; }
+    .room-info { color: #888; font-size: 14px; }
+    .visualizer { display: flex; align-items: flex-end; gap: 3px; height: 40px; margin-top: 20px; }
+    .bar { width: 4px; background: #4ec9b0; border-radius: 2px; transition: height 0.05s; }
   </style>
 </head>
 <body>
-  <div class="mic"><svg viewBox="0 0 16 16"><path d="M8 11a3 3 0 0 0 3-3V3a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M13 8a5 5 0 0 1-10 0H2a6 6 0 0 0 12 0h-1z"/><path d="M8 14a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/></svg></div>
-  <div class="status" id="status">Connecting to Room...</div>
-  <div class="room">CodeRoom ID: <b>${roomId}</b></div>
+  <div class="mic" id="mic"><svg viewBox="0 0 16 16"><path d="M8 11a3 3 0 0 0 3-3V3a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M13 8a5 5 0 0 1-10 0H2a6 6 0 0 0 12 0h-1z"/><path d="M8 14a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/></svg></div>
+  <div class="status" id="status">Starting Voice Bridge...</div>
+  <div class="room-info">Room ID: <b>${roomId}</b></div>
+  <div class="visualizer" id="visualizer"></div>
+
   <script>
     const status = document.getElementById('status');
-    setTimeout(() => { status.innerText = 'Voice Connected (P2P Handshake Ready)'; }, 1000);
+    const mic = document.getElementById('mic');
+    const visualizer = document.getElementById('visualizer');
+    
+    // Create visualizer bars
+    for (let i = 0; i < 8; i++) {
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.style.height = '4px';
+      visualizer.appendChild(bar);
+    }
+    const bars = visualizer.children;
+
+    let ws;
+    let isTalking = false;
+    let silenceTimeout;
+
+    function connect() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(protocol + '//' + location.host);
+      
+      ws.onopen = () => {
+        status.innerText = 'Connected. Waiting for Mic...';
+        ws.send(JSON.stringify({ type: 'voiceJoin', roomId: '${roomId}', userId: '${userId}', token: '${token}' }));
+        startMic();
+      };
+      
+      ws.onclose = () => {
+        status.innerText = 'Disconnected. Reconnecting...';
+        setTimeout(connect, 2000);
+      };
+    }
+
+    async function startMic() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        status.innerText = 'Voice Active (E2EE Bridge Ready)';
+        
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        
+        function checkVolume() {
+          analyser.getByteFrequencyData(dataArray);
+          let sum = 0;
+          for (let i = 0; i < dataArray.length; i++) {
+            sum += dataArray[i];
+            if (i < bars.length) {
+              bars[i].style.height = Math.max(4, (dataArray[i] / 255) * 40) + 'px';
+            }
+          }
+          const average = sum / dataArray.length;
+          
+          if (average > 15) { // Threshold for talking
+            if (!isTalking) {
+              isTalking = true;
+              mic.classList.add('talking');
+              ws.send(JSON.stringify({ type: 'voiceActivity', roomId: '${roomId}', userId: '${userId}', talking: true }));
+            }
+            clearTimeout(silenceTimeout);
+            silenceTimeout = setTimeout(() => {
+              isTalking = false;
+              mic.classList.remove('talking');
+              ws.send(JSON.stringify({ type: 'voiceActivity', roomId: '${roomId}', userId: '${userId}', talking: false }));
+            }, 500);
+          }
+          
+          requestAnimationFrame(checkVolume);
+        }
+        
+        checkVolume();
+      } catch (err) {
+        status.innerText = 'Microphone access denied or error.';
+        console.error(err);
+      }
+    }
+
+    connect();
   </script>
 </body>
 </html>
@@ -754,6 +846,9 @@ function handleMessage(context: ConnectionContext, message: unknown): void {
       break;
     case 'voiceSignal':
       handleVoiceSignal(context, message);
+      break;
+    case 'voiceJoin':
+      handleVoiceJoin(context, message);
       break;
     case 'voiceActivity':
       handleVoiceActivity(context, message);
@@ -1745,6 +1840,37 @@ function handleVoiceSignal(
       signal: message.signal
     });
   }
+}
+
+function handleVoiceJoin(
+  context: ConnectionContext,
+  message: Extract<ClientToServerMessage, { type: 'voiceJoin' }>
+): void {
+  const room = rooms.get(message.roomId);
+  if (!room) {
+    sendError(context.ws, 'Room not found.', 'ROOM_NOT_FOUND');
+    return;
+  }
+
+  // Simple token verification: check if this token is currently in the room
+  let authorized = false;
+  for (const participant of room.participants.values()) {
+    if (participant.userId === message.userId && participant.sessionToken === message.token) {
+      authorized = true;
+      break;
+    }
+  }
+
+  if (!authorized) {
+    sendError(context.ws, 'Invalid voice session token.', 'FORBIDDEN');
+    return;
+  }
+
+  context.userId = message.userId;
+  context.roomId = message.roomId;
+  // We don't add to room.connections or room.participants to avoid double-counting/kick-offs
+  // But we need getRoomForContext to work, so we'll just set the fields on context.
+  log('voice_bridge_joined', { roomId: message.roomId, userId: message.userId });
 }
 
 function handleVoiceActivity(

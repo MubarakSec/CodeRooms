@@ -11,6 +11,7 @@ export class RoomState {
   private collaboratorDirectMode = false;
   private participantActivity = new Map<string, number>();
   private participantFiles = new Map<string, string>();
+  private talkingUsers = new Set<string>();
   private mode?: RoomMode;
   private activeSharedDocLabel?: string;
   private e2eKey?: Buffer;
@@ -36,6 +37,7 @@ export class RoomState {
     this.collaboratorDirectMode = false;
     this.participantActivity.clear();
     this.participantFiles.clear();
+    this.talkingUsers.clear();
     this.mode = undefined;
     this.activeSharedDocLabel = undefined;
   }
@@ -47,6 +49,7 @@ export class RoomState {
       if (!activeIds.has(userId)) {
         this.participantActivity.delete(userId);
         this.participantFiles.delete(userId);
+        this.talkingUsers.delete(userId);
       }
     }
     this.syncCollaboratorMode();
@@ -67,6 +70,7 @@ export class RoomState {
     }
     this.participantActivity.delete(userId);
     this.participantFiles.delete(userId);
+    this.talkingUsers.delete(userId);
   }
 
   updateParticipantRole(userId: string, role: Role): void {
@@ -152,6 +156,18 @@ export class RoomState {
 
   getParticipantFile(userId: string): string | undefined {
     return this.participantFiles.get(userId);
+  }
+
+  setParticipantTalking(userId: string, talking: boolean): void {
+    if (talking) {
+      this.talkingUsers.add(userId);
+    } else {
+      this.talkingUsers.delete(userId);
+    }
+  }
+
+  isParticipantTalking(userId: string): boolean {
+    return this.talkingUsers.has(userId);
   }
 
   isParticipantTyping(userId: string): boolean {

@@ -6,6 +6,7 @@ export interface ParticipantsViewRefreshParticipant {
   role: string;
   isDirectEditMode?: boolean;
   isTyping: boolean;
+  isTalking: boolean;
   currentFile?: string;
 }
 
@@ -46,6 +47,7 @@ export function buildParticipantsViewRefreshKey(state: ParticipantsViewRefreshSt
         role: participant.role,
         isDirectEditMode: participant.isDirectEditMode,
         isTyping: participant.isTyping,
+        isTalking: participant.isTalking,
         currentFile: participant.currentFile
       }))
       .sort((left, right) => left.userId.localeCompare(right.userId)),

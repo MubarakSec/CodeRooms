@@ -230,6 +230,10 @@ export function validateClientMessage(msg: unknown): msg is ClientToServerMessag
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.targetUserId, MAX_SIMPLE_ID_LENGTH)
         && m.signal !== undefined;
+    case 'voiceJoin':
+      return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
+        && isNonEmptyBoundedString(m.userId, MAX_SIMPLE_ID_LENGTH)
+        && isNonEmptyBoundedString(m.token, 128);
     case 'voiceActivity':
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.userId, MAX_SIMPLE_ID_LENGTH)

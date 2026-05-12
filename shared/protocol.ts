@@ -62,6 +62,7 @@ export type ClientToServerMessage =
   | { type: "chatSend"; roomId: string; messageId: string; content: string; timestamp: number }
   | { type: "awarenessUpdate"; roomId: string; docId: string; update: Uint8Array }
   | { type: "voiceSignal"; roomId: string; targetUserId: string; signal: any }
+  | { type: "voiceJoin"; roomId: string; userId: string; token: string }
   | { type: "voiceActivity"; roomId: string; userId: string; talking: boolean }
   | { type: "createToken"; label?: string };
 

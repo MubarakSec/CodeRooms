@@ -12,6 +12,7 @@ export interface ParticipantViewModel {
   label: string;
   description?: string;
   tooltipLines: string[];
+  isTalking: boolean;
 }
 
 export interface StatusBarViewModel {
@@ -160,10 +161,11 @@ export function buildParticipantViewModel(args: {
   participant: Participant;
   isSelf: boolean;
   isTyping: boolean;
+  isTalking: boolean;
   currentFile?: string;
   canManage: boolean;
 }): ParticipantViewModel {
-  const { participant, isSelf, isTyping, currentFile, canManage } = args;
+  const { participant, isSelf, isTyping, isTalking, currentFile, canManage } = args;
   const descriptionParts = [formatRoleLabel(participant.role)];
 
   if (participant.role === 'collaborator') {
@@ -175,10 +177,14 @@ export function buildParticipantViewModel(args: {
   if (isTyping) {
     descriptionParts.push('typing...');
   }
+  if (isTalking) {
+    descriptionParts.push('talking...');
+  }
 
   return {
     label: isSelf ? `${participant.displayName} (you)` : participant.displayName,
     description: descriptionParts.join(' · '),
+    isTalking,
     tooltipLines: [
       `Name: ${participant.displayName}${isSelf ? ' (you)' : ''}`,
       `Role: ${formatRoleLabel(participant.role)}`,
@@ -187,6 +193,7 @@ export function buildParticipantViewModel(args: {
         : '',
       currentFile ? `Current file: ${currentFile}` : '',
       isTyping ? 'Status: typing now' : '',
+      isTalking ? 'Status: talking now' : '',
       canManage && !isSelf ? 'Action: click to change access' : ''
     ].filter(Boolean)
   };

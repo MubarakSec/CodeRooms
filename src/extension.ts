@@ -573,6 +573,11 @@ export function activate(context: vscode.ExtensionContext): void {
         documentSync.applyAwarenessUpdate(message.docId, message.update);
         break;
       }
+      case 'voiceActivity': {
+        roomState.setParticipantTalking(message.userId, message.talking);
+        scheduleRefresh();
+        break;
+      }
       case 'rootCursor': {
         lastRootCursorMessage = message;
         if (followController.isFollowing()) {
@@ -1340,7 +1345,9 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       
       const serverUrl = vscode.workspace.getConfiguration('coderooms').get<string>('serverUrl') ?? DEFAULT_SERVER_URL;
-      const voiceUrl = serverUrl.replace('ws://', 'http://').replace('wss://', 'https://') + '/voice/' + roomId;
+      const userId = roomState.getUserId();
+      const token = lastJoinSessionToken;
+      const voiceUrl = serverUrl.replace('ws://', 'http://').replace('wss://', 'https://') + '/voice/' + roomId + `?userId=${userId}&token=${token}`;
       
       const action = await vscode.window.showInformationMessage(
         'Voice chat requires an external browser tab to access your microphone.',

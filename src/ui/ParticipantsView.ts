@@ -63,8 +63,8 @@ class ActionItem extends vscode.TreeItem {
 class ParticipantItem extends vscode.TreeItem {
   readonly participant: Participant;
 
-  constructor(participant: Participant, isSelf: boolean, canManage: boolean, isTyping: boolean, currentFile?: string) {
-    const presentation = buildParticipantViewModel({ participant, isSelf, canManage, isTyping, currentFile });
+  constructor(participant: Participant, isSelf: boolean, canManage: boolean, isTyping: boolean, isTalking: boolean, currentFile?: string) {
+    const presentation = buildParticipantViewModel({ participant, isSelf, canManage, isTyping, isTalking, currentFile });
     super(presentation.label, vscode.TreeItemCollapsibleState.None);
     this.participant = participant;
     this.description = presentation.description;
@@ -75,7 +75,12 @@ class ParticipantItem extends vscode.TreeItem {
     md.isTrusted = true;
     this.tooltip = md;
 
-    this.iconPath = roleIcon(participant.role);
+    if (isTalking) {
+      this.iconPath = new vscode.ThemeIcon('pulse');
+    } else {
+      this.iconPath = roleIcon(participant.role);
+    }
+
     if (canManage && !isSelf) {
       this.command = { command: 'coderooms.changeParticipantRole', title: 'Change role', arguments: [participant] };
       this.contextValue = 'coderooms.participant.owner';
@@ -301,6 +306,7 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
         role: participant.role,
         isDirectEditMode: participant.isDirectEditMode,
         isTyping: this.roomState.isParticipantTyping(participant.userId),
+        isTalking: this.roomState.isParticipantTalking(participant.userId),
         currentFile: this.roomState.getParticipantFile(participant.userId)
       })),
       documents: this.documentSync.getSharedDocuments().map(document => ({
@@ -463,6 +469,7 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
           participant.userId === currentId,
           isRootUser,
           this.roomState.isParticipantTyping(participant.userId),
+          this.roomState.isParticipantTalking(participant.userId),
           currentFile
         );
       }));
