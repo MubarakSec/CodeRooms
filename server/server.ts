@@ -755,6 +755,9 @@ function handleMessage(context: ConnectionContext, message: unknown): void {
     case 'voiceSignal':
       handleVoiceSignal(context, message);
       break;
+    case 'voiceActivity':
+      handleVoiceActivity(context, message);
+      break;
     case 'chatSend':
       handleChatSend(context, message);
       break;
@@ -1742,6 +1745,23 @@ function handleVoiceSignal(
       signal: message.signal
     });
   }
+}
+
+function handleVoiceActivity(
+  context: ConnectionContext,
+  message: Extract<ClientToServerMessage, { type: 'voiceActivity' }>
+): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) {
+    return;
+  }
+
+  broadcast(room, {
+    type: 'voiceActivity',
+    roomId: room.roomId,
+    userId: context.userId,
+    talking: message.talking
+  }, context.ws);
 }
 
 function handleParticipantActivity(

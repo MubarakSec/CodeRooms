@@ -34,8 +34,8 @@ describe('ui view state helpers', () => {
   it('builds a disconnected session header view model', () => {
     const viewModel = buildSessionHeaderViewModel({});
 
-    expect(viewModel.label).toBe('Session');
-    expect(viewModel.description).toBe('Disconnected');
+    expect(viewModel.label).toBe('Get Started');
+    expect(viewModel.description).toBe('Collaborate');
     expect(viewModel.tooltipLines).toContain('Not connected to a room.');
   });
 

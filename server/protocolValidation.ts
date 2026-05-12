@@ -230,6 +230,10 @@ export function validateClientMessage(msg: unknown): msg is ClientToServerMessag
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.targetUserId, MAX_SIMPLE_ID_LENGTH)
         && m.signal !== undefined;
+    case 'voiceActivity':
+      return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
+        && isNonEmptyBoundedString(m.userId, MAX_SIMPLE_ID_LENGTH)
+        && typeof m.talking === 'boolean';
     case 'chatSend':
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.messageId, MAX_SIMPLE_ID_LENGTH)

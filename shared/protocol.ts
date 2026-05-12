@@ -62,6 +62,7 @@ export type ClientToServerMessage =
   | { type: "chatSend"; roomId: string; messageId: string; content: string; timestamp: number }
   | { type: "awarenessUpdate"; roomId: string; docId: string; update: Uint8Array }
   | { type: "voiceSignal"; roomId: string; targetUserId: string; signal: any }
+  | { type: "voiceActivity"; roomId: string; userId: string; talking: boolean }
   | { type: "createToken"; label?: string };
 
 export type ServerToClientMessage =
@@ -78,6 +79,7 @@ export type ServerToClientMessage =
   | { type: "docChangeBroadcast"; docId: string; version: number; patch: TextPatch; yjsUpdate?: YjsUpdate; authorId: string }
   | { type: "awarenessUpdate"; docId: string; update: Uint8Array }
   | { type: "voiceSignal"; fromUserId: string; signal: any }
+  | { type: "voiceActivity"; roomId: string; userId: string; talking: boolean }
   | { type: "fullDocumentSync"; roomId: string; docId: string; version: number; text: string; yjsState?: YjsUpdate }
   | { type: "requestFullSync"; roomId: string; docId: string }
   | { type: "newSuggestion"; suggestion: Suggestion }

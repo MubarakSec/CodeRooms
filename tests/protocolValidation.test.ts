@@ -160,6 +160,13 @@ describe('protocol validation helpers', () => {
       suggestionIds: ['s-1', 's-2'],
       action: 'reject'
     })).toBe(true);
+
+    expect(validateClientMessage({
+      type: 'voiceActivity',
+      roomId: 'ROOM42',
+      userId: 'user-1',
+      talking: true
+    })).toBe(true);
   });
 
   it('rejects malformed or abusive client message shapes', () => {
