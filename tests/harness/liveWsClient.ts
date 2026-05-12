@@ -29,6 +29,11 @@ export class LiveWsClient {
           ? Buffer.from(data)
           : Buffer.from(data as Buffer);
       const message = unpack(payload) as ServerToClientMessage;
+      if (process.env.DEBUG_WS) {
+        let logMsg = `[WS:${this.label}] RECV: ${message.type}`;
+        if (message.type === 'error') logMsg += ` (${message.code}: ${message.message})`;
+        console.log(logMsg);
+      }
       this.messages.push(message);
       this.resolveWaiters(message);
     });
@@ -40,9 +45,9 @@ export class LiveWsClient {
     });
   }
 
-  static async connect(url: string, label: string): Promise<LiveWsClient> {
+  static async connect(url: string, label: string, headers?: Record<string, string>): Promise<LiveWsClient> {
     const socket = await new Promise<WebSocket>((resolve, reject) => {
-      const ws = new WebSocket(url);
+      const ws = new WebSocket(url, { headers });
       ws.once('open', () => resolve(ws));
       ws.once('error', reject);
     });

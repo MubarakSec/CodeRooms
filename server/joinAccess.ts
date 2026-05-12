@@ -24,11 +24,6 @@ export async function validateJoinAccess(input: JoinAccessInput): Promise<JoinAc
       return { ok: true, consumeToken: true };
     }
 
-    // Accept token-shaped secrets when the room is password-protected.
-    if (input.roomSecretHash && await input.verifySecret(input.token, input.roomId, input.roomSecretHash)) {
-      return { ok: true, consumeToken: false };
-    }
-
     return {
       ok: false,
       code: 'TOKEN_INVALID',

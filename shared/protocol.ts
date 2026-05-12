@@ -70,7 +70,7 @@ export type ClientToServerMessage =
 export type ServerToClientMessage =
   | { type: "ack"; key: string }
   | { type: "roomCreated"; roomId: string; userId: string; mode: RoomMode; sessionToken: string }
-  | { type: "joinedRoom"; roomId: string; userId: string; role: Role; participants: Participant[]; mode: RoomMode; sessionToken: string }
+  | { type: "joinedRoom"; roomId: string; userId: string; role: Role; participants: Participant[]; mode: RoomMode; sessionToken: string; reclaimedSession?: boolean }
   | { type: "syncSuggestions"; suggestions: Suggestion[] }
   | { type: "participantJoined"; participant: Participant }
   | { type: "participantLeft"; userId: string }

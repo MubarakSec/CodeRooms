@@ -100,8 +100,8 @@ const patch = {
   text: 'x'
 };
 
-describe('DocumentSync micro-merge (gap 1 version)', () => {
-  it('applies patch when version gap is 1 step and avoids full sync request', async () => {
+describe('DocumentSync fallback behavior', () => {
+  it('requests full sync when Yjs update is missing instead of applying raw patch', async () => {
     const sync = new DocumentSync(fakeRoomState, fakeStorage, (msg) => sendSpy.push(msg as any));
     const yDoc = new Y.Doc();
     yDoc.getText('text').insert(0, 'text');
@@ -117,10 +117,11 @@ describe('DocumentSync micro-merge (gap 1 version)', () => {
     (sync as any).activeDocumentId = 'd1';
 
     applyResult = true;
-    await sync.applyRemoteChange('d1', patch, 3); // gap = 2 versions (missing 1)
+    await sync.applyRemoteChange('d1', patch, 3);
 
-    expect(sendSpy.length).toBe(0); // no requestFullSync
+    expect(sendSpy.length).toBe(1);
+    expect(sendSpy[0].type).toBe('requestFullSync');
     const tracked = (sync as any).documents.get('d1');
-    expect(tracked.version).toBe(3);
+    expect(tracked.version).toBe(1);
   });
 });

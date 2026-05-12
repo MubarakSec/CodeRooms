@@ -85,6 +85,7 @@ interface RoomState {
   participants: Map<string, ParticipantState>;
   recoverableSessions: Map<string, RecoverableParticipantState>;
   connections: Map<string, ConnectionContext>;
+  voiceConnections?: Map<string, ConnectionContext>;
   documents: Map<string, DocumentState>;
   suggestions: Map<string, Suggestion>;
   mode: RoomMode;
@@ -123,7 +124,7 @@ const MAX_CHAT_MESSAGES = 500;
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const inviteTokens = new Map<string, { roomId: string; label?: string; createdAt: number }>();
 const DEFAULT_BACKUP_DIR = path.join(__dirname, '..', 'backups');
-const MAX_MESSAGE_BYTES = 512 * 1024; // 512 KB hard limit per message
+const MAX_MESSAGE_BYTES = (2 * 1024 * 1024) + (256 * 1024); // 2.25 MB to accommodate 2MB docs + overhead
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024; // 2 MB limit for shared documents
 const MAX_ROOMS_GLOBAL = 500;
 const MAX_ROOMS_PER_IP = 10;
@@ -163,7 +164,7 @@ function buildPersistedRoomsSnapshot(): Record<string, PersistedRoomState> {
         docId,
         {
           docId: doc.docId,
-          text: doc.text,
+          text: doc.text ?? '',
           version: doc.version,
           originalUri: doc.originalUri,
           fileName: doc.fileName,
@@ -183,7 +184,7 @@ function buildPersistedRoomsSnapshot(): Record<string, PersistedRoomState> {
 function buildCurrentRecoveryMetrics() {
   return buildRecoveryMetrics(Array.from(rooms.values(), room => ({
     ownerIp: room.ownerIp,
-    documents: room.documents.values(),
+    documents: Array.from(room.documents.values(), doc => ({ ...doc, text: doc.text ?? '' })),
     suggestions: room.suggestions.values(),
     recoverableSessions: room.recoverableSessions.values(),
     chat: room.chat
@@ -263,7 +264,7 @@ function loadRooms(): void {
     }
     const recovered = buildRecoveryMetrics(Array.from(rooms.values(), room => ({
       ownerIp: room.ownerIp,
-      documents: room.documents.values(),
+      documents: Array.from(room.documents.values(), doc => ({ ...doc, text: doc.text ?? '' })),
       suggestions: room.suggestions.values(),
       recoverableSessions: room.recoverableSessions.values(),
       chat: room.chat
@@ -430,7 +431,11 @@ function startBackgroundTasks(idleRoomTimeoutMs: number): void {
 
 function attachConnectionHandlers(wss: WebSocketServer): void {
   wss.on('connection', (ws, request) => {
-    const ip = request.socket.remoteAddress ?? 'unknown';
+    let ip = request.socket.remoteAddress ?? 'unknown';
+    const forwarded = request.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string') {
+      ip = forwarded.split(',')[0].trim();
+    }
 
     const ipConns = connectionsPerIp.get(ip) ?? 0;
     if (ipConns >= MAX_CONNECTIONS_PER_IP) {
@@ -589,11 +594,14 @@ function handleHttpRequest(req: http.IncomingMessage, res: http.ServerResponse):
 }
 
 function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): string {
+  const safeRoomId = roomId.replace(/[&<"']/g, m => ({ '&': '&amp;', '<': '&lt;', '"': '&quot;', "'": '&#39;' }[m as string] || m));
+  const scriptData = JSON.stringify({ roomId, userId, token }).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+
   return `
 <!DOCTYPE html>
 <html>
 <head>
-  <title>CodeRooms Voice - ${roomId}</title>
+  <title>CodeRooms Voice - ${safeRoomId}</title>
   <style>
     body { background: #1e1e1e; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
     .status { font-size: 20px; margin-bottom: 20px; color: #ccc; }
@@ -612,10 +620,11 @@ function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): s
 <body>
   <div class="mic" id="mic"><svg viewBox="0 0 16 16"><path d="M8 11a3 3 0 0 0 3-3V3a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M13 8a5 5 0 0 1-10 0H2a6 6 0 0 0 12 0h-1z"/><path d="M8 14a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/></svg></div>
   <div class="status" id="status">Starting Voice Bridge...</div>
-  <div class="room-info">Room ID: <b>${roomId}</b></div>
+  <div class="room-info">Room ID: <b>${safeRoomId}</b></div>
   <div class="visualizer" id="visualizer"></div>
 
   <script>
+    const CONFIG = ${scriptData};
     const status = document.getElementById('status');
     const mic = document.getElementById('mic');
     const visualizer = document.getElementById('visualizer');
@@ -644,21 +653,15 @@ function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): s
       ws.onopen = () => {
         status.innerText = 'Connected. Requesting Mic...';
         startMic().then(() => {
-          ws.send(JSON.stringify({ type: 'voiceJoin', roomId: '${roomId}', userId: '${userId}', token: '${token}' }));
+          ws.send(JSON.stringify({ type: 'voiceJoin', roomId: CONFIG.roomId, userId: CONFIG.userId, token: CONFIG.token }));
         });
       };
       
       ws.onmessage = async (event) => {
         let msg;
         try {
-          // If the server sends a Buffer/Blob (msgpack), we'll need to parse it,
-          // but our server.ts currently accepts JSON or msgpack and responds with msgpack.
-          // Wait, the client was sending JSON and receiving nothing!
-          // We need to decode msgpack if it's binary.
           if (event.data instanceof Blob) {
              const buffer = await event.data.arrayBuffer();
-             // Not easily decoding msgpack in plain HTML without a library.
-             // We need to change the server to send JSON for voiceSignal if the connection is a VoiceBridge, or we include a msgpack library.
           } else {
              msg = JSON.parse(event.data);
           }
@@ -731,13 +734,13 @@ function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): s
             if (!isTalking) {
               isTalking = true;
               mic.classList.add('talking');
-              ws.send(msgpackr.pack({ type: 'voiceActivity', roomId: '${roomId}', userId: '${userId}', talking: true }));
+              ws.send(msgpackr.pack({ type: 'voiceActivity', roomId: CONFIG.roomId, userId: CONFIG.userId, talking: true }));
             }
             clearTimeout(silenceTimeout);
             silenceTimeout = setTimeout(() => {
               isTalking = false;
               mic.classList.remove('talking');
-              ws.send(msgpackr.pack({ type: 'voiceActivity', roomId: '${roomId}', userId: '${userId}', talking: false }));
+              ws.send(msgpackr.pack({ type: 'voiceActivity', roomId: CONFIG.roomId, userId: CONFIG.userId, talking: false }));
             }, 500);
           }
           requestAnimationFrame(checkVolume);
@@ -760,12 +763,11 @@ function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): s
 
       pc.onicecandidate = event => {
         if (event.candidate) {
-          ws.send(msgpackr.pack({ type: 'voiceSignal', roomId: '${roomId}', targetUserId: peerId, signal: { type: 'candidate', candidate: event.candidate } }));
+          ws.send(msgpackr.pack({ type: 'voiceSignal', roomId: CONFIG.roomId, targetUserId: peerId, signal: { type: 'candidate', candidate: event.candidate } }));
         }
       };
 
       pc.ontrack = event => {
-        // Play remote audio
         let audio = document.getElementById('audio-' + peerId);
         if (!audio) {
            audio = document.createElement('audio');
@@ -780,7 +782,7 @@ function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): s
         pc.createOffer().then(offer => {
           return pc.setLocalDescription(offer);
         }).then(() => {
-          ws.send(msgpackr.pack({ type: 'voiceSignal', roomId: '${roomId}', targetUserId: peerId, signal: { type: 'offer', offer: pc.localDescription } }));
+          ws.send(msgpackr.pack({ type: 'voiceSignal', roomId: CONFIG.roomId, targetUserId: peerId, signal: { type: 'offer', offer: pc.localDescription } }));
         }).catch(console.error);
       }
       return pc;
@@ -796,7 +798,7 @@ function renderVoiceBridgeHtml(roomId: string, userId: string, token: string): s
           await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
-          ws.send(msgpackr.pack({ type: 'voiceSignal', roomId: '${roomId}', targetUserId: peerId, signal: { type: 'answer', answer: pc.localDescription } }));
+          ws.send(msgpackr.pack({ type: 'voiceSignal', roomId: CONFIG.roomId, targetUserId: peerId, signal: { type: 'answer', answer: pc.localDescription } }));
         } else if (data.type === 'answer') {
           await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
         } else if (data.type === 'candidate') {
@@ -1138,12 +1140,13 @@ async function joinRoomInner(
     mode: room.mode,
     activeParticipantCount: room.participants.size,
     ownerSessionToken: room.ownerSessionToken,
+    ownerIp: room.ownerIp,
+    requestIp: context.ip,
     activeParticipants: room.participants.values(),
     recoverableSessions: room.recoverableSessions,
     requestedSessionToken: sessionToken
   });
   const participant = resolvedJoin.participant;
-
   if (resolvedJoin.previousUserId) {
     const previousConnection = room.connections.get(resolvedJoin.previousUserId);
     if (previousConnection && previousConnection.ws !== context.ws) {
@@ -1173,9 +1176,9 @@ async function joinRoomInner(
     role: participant.role,
     participants: Array.from(room.participants.values(), toPublicParticipant),
     mode: room.mode,
-    sessionToken: participant.sessionToken
+    sessionToken: participant.sessionToken,
+    reclaimedSession: resolvedJoin.reclaimedSession
   });
-
   broadcast(room, { type: 'participantJoined', participant: toPublicParticipant(participant) }, context.ws);
   replayDocumentsToConnection(room, context);
   log('room_joined', {
@@ -1212,7 +1215,8 @@ function deleteRoom(roomId: string): void {
   if (!room) { return; }
   // Reclaim memory budget for all documents in this room
   for (const doc of room.documents.values()) {
-    totalDocBytes -= Buffer.byteLength(doc.text, 'utf8');
+    const removedByteLength = doc.yjsState ? doc.yjsState.byteLength : Buffer.byteLength(doc.text || '', 'utf8');
+    totalDocBytes -= removedByteLength;
   }
   if (totalDocBytes < 0) { totalDocBytes = 0; }
   // Decrement per-IP room counter using the owner's connection IP
@@ -1484,7 +1488,8 @@ function handleUnshareDocument(context: ConnectionContext, documentId: string): 
     sendAckForMessage(context.ws, { ...message, roomId: room.roomId });
     return;
   }
-  totalDocBytes -= Buffer.byteLength(removed.text, 'utf8');
+  const removedByteLength = removed.yjsState ? removed.yjsState.byteLength : Buffer.byteLength(removed.text || '', 'utf8');
+  totalDocBytes -= removedByteLength;
   room.documents.delete(documentId);
   broadcast(room, { type: 'documentUnshared', roomId: room.roomId, documentId });
   sendAckForMessage(context.ws, { type: 'unshareDocument', roomId: room.roomId, documentId });
@@ -1517,7 +1522,7 @@ function handleDocChange(context: ConnectionContext, message: Extract<ClientToSe
     return;
   }
 
-  if (message.version <= doc.version) {
+  if (message.version <= doc.version && !message.yjsUpdate) {
     sendAckForMessage(context.ws, message);
     return;
   }
@@ -1799,6 +1804,10 @@ function handleFullDocumentSync(
     rejectTrackedMessage(context.ws, message, 'Document not found.', 'TARGET_NOT_FOUND');
     return;
   }
+  if (message.version <= doc.version) {
+    sendAckForMessage(context.ws, message);
+    return;
+  }
   const baseByteLength = doc.yjsState ? doc.yjsState.byteLength : Buffer.byteLength(doc.text || '', 'utf8');
   const newByteLength = message.yjsState ? message.yjsState.byteLength : Buffer.byteLength(message.text || '', 'utf8');
 
@@ -1883,7 +1892,7 @@ function handleVoiceSignal(
     return;
   }
   
-  const target = room.voiceConnections.get(message.targetUserId);
+  const target = room.voiceConnections?.get(message.targetUserId);
   if (target && target.ws.readyState === WebSocket.OPEN) {
     send(target.ws, {
       type: 'voiceSignal',

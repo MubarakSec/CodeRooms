@@ -25,7 +25,9 @@ vi.mock('vscode', () => {
 
 import { ChatManager } from '../src/core/ChatManager';
 
-class FakeMemento implements import('vscode').Memento {
+import type * as vscode from 'vscode';
+
+class FakeMemento implements vscode.Memento {
   private store = new Map<string, any>();
   get<T>(key: string): T | undefined {
     return this.store.get(key);

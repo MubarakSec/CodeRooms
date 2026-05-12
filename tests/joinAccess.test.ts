@@ -15,7 +15,7 @@ describe('join access validation', () => {
     expect(result).toEqual({ ok: true, consumeToken: true });
   });
 
-  it('falls back to password verification for token-shaped secrets', async () => {
+  it('rejects token-shaped secrets when the token record is missing', async () => {
     const verifySecret = vi.fn(async () => true);
 
     const result = await validateJoinAccess({
@@ -28,8 +28,8 @@ describe('join access validation', () => {
       verifySecret
     });
 
-    expect(result).toEqual({ ok: true, consumeToken: false });
-    expect(verifySecret).toHaveBeenCalledWith('0123456789abcdef0123456789abcdef', 'ROOM1', 'hash');
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('TOKEN_INVALID');
   });
 
   it('requires a secret for protected rooms without credentials', async () => {

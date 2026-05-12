@@ -31,6 +31,8 @@ export interface ResolveJoinParticipantOptions {
   mode: RoomMode;
   activeParticipantCount: number;
   ownerSessionToken: string;
+  ownerIp?: string;
+  requestIp?: string;
   activeParticipants: Iterable<ParticipantState>;
   recoverableSessions: ReadonlyMap<string, RecoverableParticipantState>;
   requestedSessionToken?: string;
@@ -119,19 +121,28 @@ export function createOwnerParticipant(userId: string, displayName: string): Par
 }
 
 export function resolveJoinParticipant(options: ResolveJoinParticipantOptions): ResolveJoinParticipantResult {
-  const reclaimed = options.requestedSessionToken
+  const isMatchingOwnerToken = options.requestedSessionToken === options.ownerSessionToken;
+  const isMatchingOwnerIp = !options.ownerIp || options.ownerIp === options.requestIp;
+  const canReclaimRoot = isMatchingOwnerToken && isMatchingOwnerIp;
+
+  // Only allow reclaiming the specific session if it's not root, OR if it is root and the IP matches.
+  let reclaimed = options.requestedSessionToken
     ? options.recoverableSessions.get(options.requestedSessionToken)
     : undefined;
+
+  if (reclaimed?.role === 'root' && !canReclaimRoot) {
+    reclaimed = undefined;
+  }
+
   const previousParticipant = options.requestedSessionToken
     ? findActiveParticipantBySessionToken(options.activeParticipants, options.requestedSessionToken)
     : undefined;
 
   const sessionToken = reclaimed?.sessionToken
-    ?? (options.requestedSessionToken === options.ownerSessionToken ? options.ownerSessionToken : uuidv4());
+    ?? (canReclaimRoot ? options.ownerSessionToken : uuidv4());
 
-  const role = options.requestedSessionToken === options.ownerSessionToken
-    ? 'root'
-    : reclaimed?.role ?? getDefaultRole(options.mode, options.activeParticipantCount);
+  const role = reclaimed?.role
+    ?? (canReclaimRoot ? 'root' : getDefaultRole(options.mode, options.activeParticipantCount));
 
   const participant: ParticipantState = {
     userId: options.userId,
@@ -149,7 +160,7 @@ export function resolveJoinParticipant(options: ResolveJoinParticipantOptions): 
   return {
     participant,
     previousUserId: previousParticipant?.userId,
-    reclaimedSession: Boolean(reclaimed || options.requestedSessionToken === options.ownerSessionToken)
+    reclaimedSession: Boolean(reclaimed || canReclaimRoot)
   };
 }
 

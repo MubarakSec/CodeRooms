@@ -168,8 +168,9 @@ export function validateClientMessage(msg: unknown): msg is ClientToServerMessag
         && isNonEmptyBoundedString(m.originalUri, MAX_URI_LENGTH)
         && isNonEmptyBoundedString(m.fileName, MAX_SHARED_FILE_NAME_LENGTH)
         && isNonEmptyBoundedString(m.languageId, MAX_LANGUAGE_ID_LENGTH)
-        && typeof m.text === 'string'
-        && isPositiveVersion(m.version);
+        && (typeof m.text === 'string' || m.text === undefined)
+        && isPositiveVersion(m.version)
+        && (m.yjsState === undefined || m.yjsState instanceof Uint8Array || Buffer.isBuffer(m.yjsState));
     case 'unshareDocument':
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.documentId, MAX_SIMPLE_ID_LENGTH);
@@ -177,7 +178,8 @@ export function validateClientMessage(msg: unknown): msg is ClientToServerMessag
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.docId, MAX_SIMPLE_ID_LENGTH)
         && isPositiveVersion(m.version)
-        && isTextPatch(m.patch);
+        && (isTextPatch(m.patch) || m.patch === undefined)
+        && (m.yjsUpdate === undefined || m.yjsUpdate instanceof Uint8Array || Buffer.isBuffer(m.yjsUpdate));
     case 'suggestion':
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.docId, MAX_SIMPLE_ID_LENGTH)
@@ -202,8 +204,9 @@ export function validateClientMessage(msg: unknown): msg is ClientToServerMessag
     case 'fullDocumentSync':
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.docId, MAX_SIMPLE_ID_LENGTH)
-        && typeof m.text === 'string'
-        && isPositiveVersion(m.version);
+        && (typeof m.text === 'string' || m.text === undefined)
+        && isPositiveVersion(m.version)
+        && (m.yjsState === undefined || m.yjsState instanceof Uint8Array || Buffer.isBuffer(m.yjsState));
     case 'rootCursor':
       return isNonEmptyBoundedString(m.roomId, MAX_ROOM_ID_LENGTH)
         && isNonEmptyBoundedString(m.docId, MAX_SIMPLE_ID_LENGTH)

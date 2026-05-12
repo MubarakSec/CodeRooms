@@ -623,10 +623,8 @@ export class DocumentSync {
       }
     }
 
-    // Fallback to OT if Yjs failed or was missing
-    if (!applied && patch) {
-      applied = await this.applyPatch(document, patch);
-    }
+    // If Yjs fails or is missing, do not fall back to raw patching
+    // as this will cause document corruption without OT guarantees.
 
     if (!applied) {
       this.requestFullSyncForDoc(docId);
