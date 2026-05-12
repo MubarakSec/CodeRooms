@@ -100,17 +100,17 @@ export class ChatView implements vscode.WebviewViewProvider {
       :root {
         color-scheme: light dark;
         --bg: var(--vscode-sideBar-background);
-        --border: var(--vscode-panel-border, rgba(128,128,128,0.2));
+        --border: var(--vscode-panel-border);
         --text-main: var(--vscode-editor-foreground);
-        --text-dim: var(--vscode-descriptionForeground, rgba(128,128,128,0.7));
+        --text-dim: var(--vscode-descriptionForeground);
         
         --bubble-other: var(--vscode-editorWidget-background);
-        --bubble-other-border: var(--vscode-editorWidget-border, transparent);
+        --bubble-other-border: var(--vscode-editorWidget-border);
         
         --bubble-self: var(--vscode-button-background);
         --bubble-self-text: var(--vscode-button-foreground);
         
-        --sys-bg: rgba(128,128,128,0.1);
+        --sys-bg: var(--vscode-input-background);
         --link-color: var(--vscode-textLink-foreground);
         --accent: var(--vscode-focusBorder);
       }
@@ -131,9 +131,7 @@ export class ChatView implements vscode.WebviewViewProvider {
       /* Sticky Header */
       .chat-header {
         padding: 12px 14px;
-        background: color-mix(in srgb, var(--bg) 85%, transparent);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
+        background: var(--bg);
         border-bottom: 1px solid var(--border);
         z-index: 10;
         flex-shrink: 0;
