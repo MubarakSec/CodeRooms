@@ -130,7 +130,7 @@ export class ChatView implements vscode.WebviewViewProvider {
 
       /* Sticky Header */
       .chat-header {
-        padding: 12px 14px;
+        padding: 12px;
         background: var(--bg);
         border-bottom: 1px solid var(--border);
         z-index: 10;
@@ -173,7 +173,7 @@ export class ChatView implements vscode.WebviewViewProvider {
 
       /* Messages Area */
       .messages {
-        flex: 1; padding: 16px 14px; overflow-y: auto;
+        flex: 1; padding: 12px; overflow-y: auto;
         display: flex; flex-direction: column; gap: 12px;
       }
       .messages::-webkit-scrollbar { width: 6px; }
@@ -195,12 +195,11 @@ export class ChatView implements vscode.WebviewViewProvider {
       .chat-row {
         display: flex; flex-direction: column;
         max-width: 85%;
-        animation: slideUp 0.2s cubic-bezier(0.1, 0.8, 0.2, 1);
-        transform-origin: bottom center;
+        animation: fadeIn 0.1s ease-out;
       }
-      @keyframes slideUp {
-        from { opacity: 0; transform: translateY(8px) scale(0.98); }
-        to { opacity: 1; transform: translateY(0) scale(1); }
+      @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
       }
 
       .chat-row.other { align-self: flex-start; }
@@ -216,21 +215,21 @@ export class ChatView implements vscode.WebviewViewProvider {
       .msg-name { font-weight: 600; color: var(--text-main); }
       
       .bubble {
-        padding: 8px 12px; font-size: 13px; line-height: 1.45;
+        padding: 12px; font-size: 13px; line-height: 1.45;
         word-break: break-word; position: relative;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        border-radius: 4px;
+        box-shadow: none;
+        border: 1px solid var(--border);
       }
       
       .chat-row.other .bubble {
         background: var(--bubble-other);
         border: 1px solid var(--bubble-other-border);
-        border-radius: 12px 12px 12px 2px;
       }
       
       .chat-row.self .bubble {
         background: var(--bubble-self);
         color: var(--bubble-self-text);
-        border-radius: 12px 12px 2px 12px;
       }
 
       .bubble a { color: inherit; text-decoration: underline; opacity: 0.9; }
@@ -246,7 +245,7 @@ export class ChatView implements vscode.WebviewViewProvider {
 
       /* Composer */
       .composer-container {
-        padding: 12px 14px;
+        padding: 12px;
         background: var(--bg);
         border-top: 1px solid var(--border);
         z-index: 10; flex-shrink: 0;
