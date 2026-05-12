@@ -64,8 +64,8 @@ export function buildSessionHeaderViewModel(args: {
 }): HeaderViewModel {
   if (!args.roomId) {
     return {
-      label: 'Session',
-      description: 'Disconnected',
+      label: 'Get Started',
+      description: 'Collaborate',
       tooltipLines: [
         'Not connected to a room.',
         'Start or join a CodeRoom to collaborate in real time.'

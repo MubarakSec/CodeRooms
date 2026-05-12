@@ -319,7 +319,7 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
       role,
       mode: this.roomState.getRoomMode()
     });
-    const icon = roomId ? roleIcon(role) : new vscode.ThemeIcon('debug-disconnect');
+    const icon = roomId ? roleIcon(role) : new vscode.ThemeIcon('rocket');
     const header = new BlockItem(Block.Session, presentation.label, presentation.description, icon);
 
     const md = new vscode.MarkdownString(
@@ -337,10 +337,8 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
     const mode = this.roomState.getRoomMode();
 
     if (!roomId) {
-      items.push(new InfoItem('Not in a room', 'Start or join to begin', new vscode.ThemeIcon('debug-disconnect')));
       items.push(new ActionItem('Start room', 'coderooms.startAsRoot', [], new vscode.ThemeIcon('debug-start')));
       items.push(new ActionItem('Join a room', 'coderooms.joinRoom', [], new vscode.ThemeIcon('sign-in')));
-      items.push(new ActionItem('Reconnect', 'coderooms.reconnect', [], new vscode.ThemeIcon('refresh')));
       return items;
     }
 

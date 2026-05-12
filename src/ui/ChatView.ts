@@ -167,7 +167,7 @@ export class ChatView implements vscode.WebviewViewProvider {
         display: flex; flex-direction: column; align-items: center; justify-content: center;
         padding: 30px; text-align: center; pointer-events: none;
       }
-      .empty-icon { font-size: 48px; margin-bottom: 16px; opacity: 0.2; filter: grayscale(1); }
+      .empty-icon { width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.2; color: var(--text-main); }
       .empty-title { font-weight: 600; font-size: 14px; margin-bottom: 8px; opacity: 0.8; }
       .empty-sub { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
 
@@ -308,7 +308,9 @@ export class ChatView implements vscode.WebviewViewProvider {
       </div>
       
       <div id="empty" class="empty-state">
-        <div class="empty-icon">💭</div>
+        <div class="empty-icon">
+          <svg width="48" height="48" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M1 2v9h4v4l4-4h6V2H1zm1 1h12v7H8.5l-2.5 2.5V10H2V3z"/></svg>
+        </div>
         <div class="empty-title">It's quiet here...</div>
         <div class="empty-sub">Send a message to start collaborating with the room. End-to-End Encrypted.</div>
       </div>
