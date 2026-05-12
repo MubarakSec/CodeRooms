@@ -127,7 +127,7 @@ class SuggestionItem extends vscode.TreeItem {
 
     const preview = buildSuggestionPreview(suggestion.patches, 60);
     const createdTime = new Date(suggestion.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    this.description = `by ${suggestion.authorName} · ${suggestion.patches.length} patch${suggestion.patches.length !== 1 ? 'es' : ''} · ${createdTime}`;
+    this.description = `by ${suggestion.authorName} · ${createdTime}`;
 
     const md = new vscode.MarkdownString();
     md.isTrusted = true;
