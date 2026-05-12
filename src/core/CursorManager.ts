@@ -12,13 +12,16 @@ interface RemoteCursor {
 interface AppliedDecorationState {
   cursor: string;
   selection: string;
+  activityGlow?: string;
 }
 
 export class CursorManager {
   private cursors = new Map<string, RemoteCursor>();
-  private decorationTypes = new Map<string, { cursor: vscode.TextEditorDecorationType, selection: vscode.TextEditorDecorationType }>();
+  private decorationTypes = new Map<string, { cursor: vscode.TextEditorDecorationType, selection: vscode.TextEditorDecorationType, activityGlow: vscode.TextEditorDecorationType }>();
   private appliedDecorations = new Map<vscode.TextEditor, Map<string, AppliedDecorationState>>();
   private refreshTimer?: NodeJS.Timeout;
+  private typingTimers = new Map<string, NodeJS.Timeout>();
+  private typingUsers = new Set<string>();
 
   // A fixed palette of colors for participants
   private colors = [
@@ -35,7 +38,7 @@ export class CursorManager {
     return this.colors[index];
   }
 
-  private getDecorationType(userId: string): { cursor: vscode.TextEditorDecorationType, selection: vscode.TextEditorDecorationType } {
+  private getDecorationType(userId: string): { cursor: vscode.TextEditorDecorationType, selection: vscode.TextEditorDecorationType, activityGlow: vscode.TextEditorDecorationType } {
     if (!this.decorationTypes.has(userId)) {
       const color = this.getColorForUser(userId);
       const cursor = vscode.window.createTextEditorDecorationType({
@@ -51,7 +54,12 @@ export class CursorManager {
         borderRadius: '2px'
       });
 
-      this.decorationTypes.set(userId, { cursor, selection });
+      const activityGlow = vscode.window.createTextEditorDecorationType({
+        backgroundColor: `${color}40`, // 25% opacity
+        borderRadius: '4px'
+      });
+
+      this.decorationTypes.set(userId, { cursor, selection, activityGlow });
     }
     return this.decorationTypes.get(userId)!;
   }
@@ -72,6 +80,25 @@ export class CursorManager {
     this.scheduleRefreshDecorations();
   }
 
+  public setTyping(userId: string, isTyping: boolean) {
+    const existingTimer = this.typingTimers.get(userId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      this.typingTimers.delete(userId);
+    }
+
+    if (isTyping) {
+      this.typingUsers.add(userId);
+      const timer = setTimeout(() => {
+        this.setTyping(userId, false);
+      }, 2000);
+      this.typingTimers.set(userId, timer);
+    } else {
+      this.typingUsers.delete(userId);
+    }
+    this.scheduleRefreshDecorations();
+  }
+
   public removeCursor(userId: string) {
     this.cursors.delete(userId);
     this.clearAppliedDecorationsForUser(userId);
@@ -79,8 +106,15 @@ export class CursorManager {
     if (dt) {
       dt.cursor.dispose();
       dt.selection.dispose();
+      dt.activityGlow.dispose();
       this.decorationTypes.delete(userId);
     }
+    const timer = this.typingTimers.get(userId);
+    if (timer) {
+      clearTimeout(timer);
+      this.typingTimers.delete(userId);
+    }
+    this.typingUsers.delete(userId);
   }
 
   public clearAll() {
@@ -89,8 +123,14 @@ export class CursorManager {
     for (const dt of this.decorationTypes.values()) {
       dt.cursor.dispose();
       dt.selection.dispose();
+      dt.activityGlow.dispose();
     }
     this.decorationTypes.clear();
+    for (const timer of this.typingTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.typingTimers.clear();
+    this.typingUsers.clear();
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = undefined;
@@ -170,9 +210,13 @@ export class CursorManager {
           });
         }
 
+        const isTyping = this.typingUsers.has(userId);
+        const glowRanges = isTyping ? [new vscode.Range(cursorPosition, cursorPosition)] : [];
+
         const nextState: AppliedDecorationState = {
           cursor: this.rangeSignature(cursorRanges),
-          selection: this.rangeSignature(selectionRanges)
+          selection: this.rangeSignature(selectionRanges),
+          activityGlow: this.rangeSignature(glowRanges)
         };
         const previousState = editorState.get(userId);
         if (!previousState || previousState.cursor !== nextState.cursor) {
@@ -180,6 +224,9 @@ export class CursorManager {
         }
         if (!previousState || previousState.selection !== nextState.selection) {
           editor.setDecorations(dt.selection, selectionRanges);
+        }
+        if (!previousState || previousState.activityGlow !== nextState.activityGlow) {
+          editor.setDecorations(dt.activityGlow, glowRanges);
         }
         editorState.set(userId, nextState);
       }
@@ -201,6 +248,7 @@ export class CursorManager {
       if (dt) {
         editor.setDecorations(dt.cursor, []);
         editor.setDecorations(dt.selection, []);
+        editor.setDecorations(dt.activityGlow, []);
       }
       editorState.delete(userId);
       if (editorState.size === 0) {
@@ -218,6 +266,7 @@ export class CursorManager {
         }
         editor.setDecorations(dt.cursor, []);
         editor.setDecorations(dt.selection, []);
+        editor.setDecorations(dt.activityGlow, []);
       }
     }
     this.appliedDecorations.clear();

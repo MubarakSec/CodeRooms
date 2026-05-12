@@ -582,6 +582,9 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       case 'participantActivity': {
         roomState.setParticipantActivity(message.userId, message.at);
+        if (message.activity === 'typing') {
+          cursorManager.setTyping(message.userId, true);
+        }
         scheduleRefresh();
         scheduleParticipantActivityExpiryRefresh();
         break;
