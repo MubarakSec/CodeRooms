@@ -65,7 +65,14 @@ export type ClientToServerMessage =
   | { type: "voiceJoin"; roomId: string; userId: string; token: string }
   | { type: "voiceActivity"; roomId: string; userId: string; talking: boolean }
   | { type: "voiceMute"; roomId: string; userId: string; muted: boolean }
-  | { type: "createToken"; label?: string };
+  | { type: "createToken"; label?: string }
+  | { type: "terminalCreate"; roomId: string; terminalId: string; name: string; isReadOnly?: boolean }
+  | { type: "terminalData"; roomId: string; terminalId: string; data: string }
+  | { type: "terminalInput"; roomId: string; terminalId: string; data: string }
+  | { type: "terminalClose"; roomId: string; terminalId: string }
+  | { type: "tunnelStart"; roomId: string; port: number }
+  | { type: "tunnelRequest"; roomId: string; requestId: string; port: number; method: string; path: string; headers: Record<string, string>; body?: string }
+  | { type: "tunnelResponse"; roomId: string; requestId: string; statusCode: number; headers: Record<string, string>; body?: string; error?: string };
 
 export type ServerToClientMessage =
   | { type: "ack"; key: string }
@@ -113,4 +120,11 @@ export type ServerToClientMessage =
       isSystem?: boolean;
     }
   | { type: "error"; message: string; code?: string }
-  | { type: "tokenCreated"; token: string; label?: string };
+  | { type: "tokenCreated"; token: string; label?: string }
+  | { type: "terminalCreate"; roomId: string; terminalId: string; name: string; isReadOnly?: boolean }
+  | { type: "terminalData"; roomId: string; terminalId: string; data: string }
+  | { type: "terminalInput"; roomId: string; terminalId: string; data: string }
+  | { type: "terminalClose"; roomId: string; terminalId: string }
+  | { type: "tunnelStart"; roomId: string; port: number }
+  | { type: "tunnelRequest"; roomId: string; requestId: string; port: number; method: string; path: string; headers: Record<string, string>; body?: string }
+  | { type: "tunnelResponse"; roomId: string; requestId: string; statusCode: number; headers: Record<string, string>; body?: string; error?: string };

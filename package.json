@@ -29,6 +29,8 @@
         "onCommand:coderooms.leaveRoom",
         "onCommand:coderooms.shareCurrentFile",
         "onCommand:coderooms.shareWorkspace",
+        "onCommand:coderooms.shareTerminal",
+        "onCommand:coderooms.forwardPort",
         "onCommand:coderooms.toggleCollaboratorMode",
         "onCommand:coderooms.toggleFollowRoot",
         "onCommand:coderooms.exportRoom",
@@ -118,6 +120,14 @@
             {
                 "command": "coderooms.shareWorkspace",
                 "title": "CodeRooms: Share Entire Workspace"
+            },
+            {
+                "command": "coderooms.shareTerminal",
+                "title": "CodeRooms: Share Terminal"
+            },
+            {
+                "command": "coderooms.forwardPort",
+                "title": "CodeRooms: Forward Port"
             },
             {
                 "command": "coderooms.toggleCollaboratorMode",

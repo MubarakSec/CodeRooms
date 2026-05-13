@@ -7,6 +7,8 @@ import { DocumentSync } from './core/DocumentSync';
 import { FollowController } from './core/FollowController';
 import { RoomEvent, RoomStorage } from './core/RoomStorage';
 import { SuggestionManager } from './core/SuggestionManager';
+import { TerminalManager } from './core/TerminalManager';
+import { PortForwardManager } from './core/PortForwardManager';
 import { ChatManager } from './core/ChatManager';
 import { CursorManager } from './core/CursorManager';
 import { OutboundMessageQueue } from './core/OutboundMessageQueue';
@@ -126,6 +128,52 @@ export function activate(context: vscode.ExtensionContext): void {
     scheduleRefresh();
   });
   const suggestionManager = new SuggestionManager(roomState, documentSync);
+  const terminalManager = new TerminalManager(
+    (terminalId: string, name: string, isReadOnly: boolean) => {
+      const roomId = roomState.getRoomId();
+      if (roomId && roomState.isRoot()) {
+        sendClientMessage({ type: 'terminalCreate', roomId, terminalId, name, isReadOnly });
+      }
+    },
+    (terminalId: string, data: string) => {
+      const roomId = roomState.getRoomId();
+      if (roomId && roomState.isRoot()) {
+        sendClientMessage({ type: 'terminalData', roomId, terminalId, data });
+      }
+    },
+    (terminalId: string, data: string) => {
+      const roomId = roomState.getRoomId();
+      if (roomId) {
+        sendClientMessage({ type: 'terminalInput', roomId, terminalId, data });
+      }
+    },
+    (terminalId: string) => {
+      const roomId = roomState.getRoomId();
+      if (roomId && roomState.isRoot()) {
+        sendClientMessage({ type: 'terminalClose', roomId, terminalId });
+      }
+    }
+  );
+  const portForwardManager = new PortForwardManager(
+    (port: number) => {
+      const roomId = roomState.getRoomId();
+      if (roomId && roomState.isRoot()) {
+        sendClientMessage({ type: 'tunnelStart', roomId, port });
+      }
+    },
+    (requestId: string, port: number, method: string, path: string, headers: Record<string, string>, body?: string) => {
+      const roomId = roomState.getRoomId();
+      if (roomId) {
+        sendClientMessage({ type: 'tunnelRequest', roomId, requestId, port, method, path, headers, body });
+      }
+    },
+    (requestId: string, statusCode: number, headers: Record<string, string>, body?: string, error?: string) => {
+      const roomId = roomState.getRoomId();
+      if (roomId && roomState.isRoot()) {
+        sendClientMessage({ type: 'tunnelResponse', roomId, requestId, statusCode, headers, body, error });
+      }
+    }
+  );
   const participantsView = new ParticipantsView(roomState, documentSync, suggestionManager, followController);
   const chatView = new ChatView(chatManager, roomState);
   const cursorManager = new CursorManager();
@@ -682,6 +730,34 @@ export function activate(context: vscode.ExtensionContext): void {
         );
         break;
       }
+      case 'terminalCreate': {
+        terminalManager.handleTerminalCreate(message.terminalId, message.name, message.isReadOnly);
+        break;
+      }
+      case 'terminalData': {
+        terminalManager.handleTerminalData(message.terminalId, message.data);
+        break;
+      }
+      case 'terminalInput': {
+        terminalManager.handleTerminalInputFromRemote(message.terminalId, message.data);
+        break;
+      }
+      case 'terminalClose': {
+        terminalManager.handleTerminalClose(message.terminalId);
+        break;
+      }
+      case 'tunnelStart': {
+        portForwardManager.handleTunnelStart(message.port);
+        break;
+      }
+      case 'tunnelRequest': {
+        void portForwardManager.handleTunnelRequest(message.requestId, message.port, message.method, message.path, message.headers, message.body);
+        break;
+      }
+      case 'tunnelResponse': {
+        portForwardManager.handleTunnelResponse(message.requestId, message.statusCode, message.headers, message.body, message.error);
+        break;
+      }
       case 'error': {
         const payload = message.message || 'Unknown error';
         switch (message.code) {
@@ -900,6 +976,44 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       void vscode.window.showInformationMessage(`Successfully shared ${count} files from the workspace.`);
     });
+  }
+
+  async function shareTerminal(): Promise<void> {
+    if (!roomState.isRoot()) {
+      void vscode.window.showWarningMessage('Only the room owner can share a terminal.');
+      return;
+    }
+    
+    const mode = await vscode.window.showQuickPick(['Read-Only (View Only)', 'Read-Write (Collaborators can type)'], {
+      placeHolder: 'Select Terminal Sharing Mode'
+    });
+    
+    if (!mode) return;
+    
+    const isReadOnly = mode.startsWith('Read-Only');
+    terminalManager.createAndShareTerminal(isReadOnly);
+  }
+
+  async function forwardPort(): Promise<void> {
+    if (!roomState.isRoot()) {
+      void vscode.window.showWarningMessage('Only the room owner can forward ports.');
+      return;
+    }
+    const input = await vscode.window.showInputBox({
+      prompt: 'Enter the local port to forward (e.g., 3000)',
+      validateInput: (value) => {
+        const port = parseInt(value, 10);
+        if (isNaN(port) || port <= 0 || port > 65535) {
+          return 'Please enter a valid port number (1-65535)';
+        }
+        return null;
+      }
+    });
+
+    if (input) {
+      const port = parseInt(input, 10);
+      portForwardManager.sharePort(port);
+    }
   }
 
   function toggleFollowRoot(): void {
@@ -1323,6 +1437,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('coderooms.leaveRoom', leaveRoom),
     vscode.commands.registerCommand('coderooms.shareCurrentFile', shareCurrentFile),
     vscode.commands.registerCommand('coderooms.shareWorkspace', shareWorkspace),
+    vscode.commands.registerCommand('coderooms.shareTerminal', shareTerminal),
+    vscode.commands.registerCommand('coderooms.forwardPort', forwardPort),
     vscode.commands.registerCommand('coderooms.toggleCollaboratorMode', toggleCollaboratorMode),
     vscode.commands.registerCommand('coderooms.toggleFollowRoot', toggleFollowRoot),
     vscode.commands.registerCommand('coderooms.exportRoom', exportRoom),

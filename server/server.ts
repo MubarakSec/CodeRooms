@@ -974,6 +974,27 @@ function handleMessage(context: ConnectionContext, message: unknown): void {
     case 'createToken':
       handleCreateToken(context, message.label);
       break;
+    case 'terminalCreate':
+      handleTerminalCreate(context, message);
+      break;
+    case 'terminalData':
+      handleTerminalData(context, message);
+      break;
+    case 'terminalInput':
+      handleTerminalInput(context, message);
+      break;
+    case 'terminalClose':
+      handleTerminalClose(context, message);
+      break;
+    case 'tunnelStart':
+      handleTunnelStart(context, message);
+      break;
+    case 'tunnelRequest':
+      handleTunnelRequest(context, message);
+      break;
+    case 'tunnelResponse':
+      handleTunnelResponse(context, message);
+      break;
   }
 }
 
@@ -2335,6 +2356,75 @@ function handleCursorUpdate(
     },
     context.ws
   );
+}
+
+function handleTerminalCreate(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'terminalCreate' }>): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) {
+    sendError(context.ws, 'Room does not match your active session.', 'ROOM_STATE_INVALID');
+    return;
+  }
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
+    sendError(context.ws, 'Only the room owner can share terminals.', 'FORBIDDEN');
+    return;
+  }
+  broadcast(room, message, context.ws);
+}
+
+function handleTerminalData(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'terminalData' }>): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) return;
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) return;
+  broadcast(room, message, context.ws);
+}
+
+function handleTerminalInput(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'terminalInput' }>): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) return;
+  
+  // Forward the input back to the room owner
+  const ownerConnection = room.connections.get(room.ownerId);
+  if (ownerConnection) {
+    send(ownerConnection.ws, message);
+  }
+}
+
+function handleTerminalClose(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'terminalClose' }>): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) return;
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) return;
+  broadcast(room, message, context.ws);
+}
+
+function handleTunnelStart(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'tunnelStart' }>): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) return;
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) {
+    sendError(context.ws, 'Only the room owner can share ports.', 'FORBIDDEN');
+    return;
+  }
+  broadcast(room, message, context.ws);
+}
+
+function handleTunnelRequest(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'tunnelRequest' }>): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) return;
+  
+  // Forward the request to the room owner
+  const ownerConnection = room.connections.get(room.ownerId);
+  if (ownerConnection) {
+    send(ownerConnection.ws, message);
+  }
+}
+
+function handleTunnelResponse(context: ConnectionContext, message: Extract<ClientToServerMessage, { type: 'tunnelResponse' }>): void {
+  const room = getRoomForContext(context);
+  if (!room || room.roomId !== message.roomId) return;
+  if (!canPerformOwnerAction(context.userId, room.ownerId)) return;
+  
+  // Broadcast the response to everyone, or ideally just the requester.
+  // The simplest is to broadcast. The client can filter by requestId.
+  broadcast(room, message, context.ws);
 }
 
 if (!process.env.VITEST && require.main === module) {
