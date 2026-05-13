@@ -20,6 +20,7 @@ import { log } from './logger';
 import { RateLimiter } from './rateLimiter';
 import path from 'path';
 import { pack, unpack } from 'msgpackr';
+import * as Y from 'yjs';
 import { getClientMessageAckKey } from '../shared/ackKeys';
 import { getNextTotalDocBytes } from './accounting';
 import { transformPatch, VersionedPatch } from './ot';
@@ -79,6 +80,7 @@ interface ConnectionContext {
   role?: Role;
   roomId?: string;
   ip?: string;
+  stateVectors?: Record<string, Uint8Array>;
 }
 
 interface RoomState {
@@ -902,7 +904,7 @@ function handleMessage(context: ConnectionContext, message: unknown): void {
       void createRoom(context, message.displayName, message.mode, message.secret);
       break;
     case 'joinRoom':
-      void joinRoom(context, message.roomId, message.displayName, message.secret, message.token, message.sessionToken);
+      void joinRoom(context, message.roomId, message.displayName, message.secret, message.token, message.sessionToken, message.stateVectors);
       break;
     case 'leaveRoom':
       cleanupRoomMembership(context);
@@ -1067,7 +1069,8 @@ async function joinRoom(
   displayName: string,
   secret?: string,
   token?: string,
-  sessionToken?: string
+  sessionToken?: string,
+  stateVectors?: Record<string, Uint8Array>
 ): Promise<void> {
   if (!roomOperationGuards.beginConnectionOperation(context.userId)) {
     sendError(context.ws, 'Please wait for your previous request to complete.', 'BUSY');
@@ -1084,7 +1087,7 @@ async function joinRoom(
     return;
   }
   try {
-    await joinRoomInner(context, roomId, displayName, secret, token, sessionToken);
+    await joinRoomInner(context, roomId, displayName, secret, token, sessionToken, stateVectors);
   } finally {
     roomOperationGuards.endJoinClaim(roomId, joinClaimKey);
     roomOperationGuards.endConnectionOperation(context.userId);
@@ -1097,7 +1100,8 @@ async function joinRoomInner(
   displayName: string,
   secret?: string,
   token?: string,
-  sessionToken?: string
+  sessionToken?: string,
+  stateVectors?: Record<string, Uint8Array>
 ): Promise<void> {
   if (isJoinBlocked(context)) {
     return;
@@ -1138,6 +1142,7 @@ async function joinRoomInner(
 
   context.roomId = roomId;
   context.displayName = displayName;
+  context.stateVectors = stateVectors;
 
   const resolvedJoin = resolveJoinParticipant({
     userId: context.userId,
@@ -2177,6 +2182,27 @@ function rejectTrackedMessage(ws: WebSocket, message: ClientToServerMessage, err
 
 function replayDocumentsToConnection(room: RoomState, context: ConnectionContext): void {
   for (const doc of room.documents.values()) {
+    let yjsUpdate = doc.yjsState;
+    let text = doc.text;
+
+    // Efficient reconnection: if the client provided a state vector, send only the diff.
+    const clientVector = context.stateVectors?.[doc.docId];
+    if (clientVector && doc.yjsState) {
+      try {
+        const tempYDoc = new Y.Doc();
+        Y.applyUpdate(tempYDoc, doc.yjsState);
+        yjsUpdate = Y.encodeStateAsUpdate(tempYDoc, clientVector);
+        // If we send a diff, we don't need to send the full text (client already has a version of it).
+        text = undefined;
+        log('doc_replay_diff', { roomId: room.roomId, docId: doc.docId, userId: context.userId, diffSize: yjsUpdate.byteLength });
+      } catch (e) {
+        log('error', { message: `Failed to compute Yjs diff for docId=${doc.docId}`, error: String(e) });
+        // Fallback to full state if diffing fails
+        yjsUpdate = doc.yjsState;
+        text = doc.text;
+      }
+    }
+
     send(context.ws, {
       type: 'shareDocument',
       roomId: room.roomId,
@@ -2184,9 +2210,9 @@ function replayDocumentsToConnection(room: RoomState, context: ConnectionContext
       originalUri: doc.originalUri,
       fileName: doc.fileName,
       languageId: doc.languageId ?? 'text',
-      text: doc.text,
+      text,
       version: doc.version,
-      yjsState: doc.yjsState
+      yjsState: yjsUpdate
     });
   }
   replaySuggestionsToConnection(room, context);

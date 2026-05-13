@@ -261,13 +261,9 @@ export class ChatView implements vscode.WebviewViewProvider {
       .chat-row {
         display: flex; flex-direction: column;
         max-width: 85%;
-        animation: fadeIn 0.1s ease-out;
+        animation: none;
       }
-      @keyframes fadeIn {
-        from { opacity: 0; }
-        to { opacity: 1; }
-      }
-
+      
       .chat-row.other { align-self: flex-start; }
       .chat-row.self { align-self: flex-end; }
 
@@ -281,7 +277,7 @@ export class ChatView implements vscode.WebviewViewProvider {
       .msg-name { font-weight: 600; color: var(--text-main); }
       
       .bubble {
-        padding: 12px; font-size: 13px; line-height: 1.45;
+        padding: 8px 12px; font-size: 13px; line-height: 1.45;
         word-break: break-word; position: relative;
         border-radius: 4px;
         box-shadow: none;
@@ -296,6 +292,7 @@ export class ChatView implements vscode.WebviewViewProvider {
       .chat-row.self .bubble {
         background: var(--bubble-self);
         color: var(--bubble-self-text);
+        border: 1px solid var(--accent);
       }
 
       .bubble a { color: inherit; text-decoration: underline; opacity: 0.9; }
@@ -303,15 +300,14 @@ export class ChatView implements vscode.WebviewViewProvider {
 
       /* Talking State */
       .chat-row.talking .bubble {
-        box-shadow: 0 0 8px var(--vscode-charts-green);
         border-color: var(--vscode-charts-green);
+        border-width: 2px;
       }
 
       /* Typing Indicator */
       .typing-indicator {
         padding: 4px 16px; font-size: 11px; color: var(--text-dim);
         font-style: italic; min-height: 18px; display: none;
-        animation: fadeIn 0.2s;
       }
       .typing-indicator.visible { display: block; }
 
@@ -319,8 +315,9 @@ export class ChatView implements vscode.WebviewViewProvider {
       .system-row {
         align-self: center; margin: 4px 0;
         background: var(--sys-bg); padding: 4px 12px;
-        border-radius: 12px; font-size: 11px; color: var(--text-dim);
+        border-radius: 4px; font-size: 11px; color: var(--text-dim);
         text-align: center; max-width: 90%; line-height: 1.4;
+        border: 1px solid var(--border);
       }
 
       /* Composer */
@@ -334,8 +331,8 @@ export class ChatView implements vscode.WebviewViewProvider {
         display: flex; align-items: flex-end; gap: 8px;
         background: var(--vscode-input-background, rgba(0,0,0,0.1));
         border: 1px solid var(--vscode-input-border, var(--border));
-        border-radius: 16px; padding: 4px 4px 4px 12px;
-        transition: border-color 0.2s;
+        border-radius: 4px; padding: 4px 4px 4px 12px;
+        transition: none;
       }
       .composer:focus-within { border-color: var(--accent); }
 
@@ -347,27 +344,26 @@ export class ChatView implements vscode.WebviewViewProvider {
       .input::placeholder { color: var(--text-dim); opacity: 0.7; }
 
       .send-btn {
-        width: 30px; height: 30px; border-radius: 12px; border: none;
+        width: 30px; height: 30px; border-radius: 4px; border: none;
         background: var(--accent); color: #fff; cursor: pointer;
         display: flex; align-items: center; justify-content: center;
-        flex-shrink: 0; transition: all 0.2s cubic-bezier(0.1, 0.8, 0.2, 1);
-        opacity: 0.5; transform: scale(0.9); pointer-events: none;
+        flex-shrink: 0; transition: none;
+        opacity: 0.5; pointer-events: none;
       }
-      .send-btn.active { opacity: 1; transform: scale(1); pointer-events: auto; }
+      .send-btn.active { opacity: 1; pointer-events: auto; }
       .send-btn:hover { filter: brightness(1.1); }
-      .send-btn:active { transform: scale(0.95); }
       .send-btn svg { width: 14px; height: 14px; fill: currentColor; transform: translateX(1px); }
 
       /* Scroll Anchor */
       .scroll-anchor {
         position: absolute; bottom: 70px; right: 14px;
-        width: 32px; height: 32px; border-radius: 50%;
+        width: 32px; height: 32px; border-radius: 4px;
         background: var(--bubble-other); border: 1px solid var(--border);
         color: var(--text-main); cursor: pointer; display: none;
         align-items: center; justify-content: center; z-index: 20;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.15); transition: opacity 0.2s;
+        box-shadow: none; transition: none;
       }
-      .scroll-anchor.visible { display: flex; animation: slideUp 0.2s; }
+      .scroll-anchor.visible { display: flex; }
       .scroll-anchor:hover { background: var(--hover-bg); }
     </style>
   </head>

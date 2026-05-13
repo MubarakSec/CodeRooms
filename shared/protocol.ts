@@ -42,7 +42,7 @@ export interface Suggestion {
 
 export type ClientToServerMessage =
   | { type: "createRoom"; displayName: string; mode: RoomMode; secret?: string }
-  | { type: "joinRoom"; roomId: string; displayName: string; secret?: string; token?: string; sessionToken?: string }
+  | { type: "joinRoom"; roomId: string; displayName: string; secret?: string; token?: string; sessionToken?: string; stateVectors?: Record<string, Uint8Array> }
   | { type: "leaveRoom" }
   | { type: "removeParticipant"; userId: string }
   | { type: "updateRole"; userId: string; role: "collaborator" | "viewer" }

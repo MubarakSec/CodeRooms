@@ -97,6 +97,16 @@ export class DocumentSync {
     });
   }
 
+  getStateVectors(): Record<string, Uint8Array> {
+    const vectors: Record<string, Uint8Array> = {};
+    for (const [docId, doc] of this.documents) {
+      if (doc.yDoc) {
+        vectors[docId] = Y.encodeStateVector(doc.yDoc);
+      }
+    }
+    return vectors;
+  }
+
   dispose(): void {
     this.disposables.forEach(disposable => disposable.dispose());
   }
@@ -439,80 +449,75 @@ export class DocumentSync {
     try {
       await this.storage.prepare();
       const pendingShare = this.pendingShareDocs.get(message.docId);
-      const { uri: storageUri } = await this.storage.registerDocument(
-        message.roomId,
-        message.docId,
-        message.fileName,
-        message.originalUri,
-        message.text ?? '',
-        message.version
-      );
+      let tracked = this.documents.get(message.docId);
 
-      const yDoc = new Y.Doc();
-      if (message.yjsState) {
-        try {
-          const e2eKey = this.roomState.getE2EKey();
-          const yjsState = e2eKey ? decryptBinary(message.yjsState, e2eKey) : message.yjsState;
-          if (yjsState) {
-            Y.applyUpdate(yDoc, yjsState);
+      const e2eKey = this.roomState.getE2EKey();
+
+      let effectiveUri = tracked?.uri;
+
+      if (tracked && tracked.yDoc) {
+        // Reconnection: merge the incoming diff/update into existing yDoc
+        if (message.yjsState) {
+          try {
+            const yjsUpdate = e2eKey ? decryptBinary(message.yjsState, e2eKey) : message.yjsState;
+            if (yjsUpdate) {
+              Y.applyUpdate(tracked.yDoc, yjsUpdate);
+            }
+          } catch (e) {
+            logger.error(`Failed to merge Yjs update for docId=${message.docId}: ${String(e)}`);
           }
-        } catch (e) {
-          logger.error(`Failed to restore Yjs state for docId=${message.docId}: ${String(e)}`);
-          // Fallback to text if Yjs fails
+        }
+        tracked.version = message.version;
+        tracked.fileName = message.fileName;
+        tracked.languageId = message.languageId;
+      } else {
+        const { uri: storageUri } = await this.storage.registerDocument(
+          message.roomId,
+          message.docId,
+          message.fileName,
+          message.originalUri,
+          message.text ?? '',
+          message.version
+        );
+        effectiveUri = storageUri;
+
+        const yDoc = new Y.Doc();
+        if (message.yjsState) {
+          try {
+            const yjsState = e2eKey ? decryptBinary(message.yjsState, e2eKey) : message.yjsState;
+            if (yjsState) {
+              Y.applyUpdate(yDoc, yjsState);
+            }
+          } catch (e) {
+            logger.error(`Failed to restore Yjs state for docId=${message.docId}: ${String(e)}`);
+            // Fallback to text if Yjs fails
+            yDoc.getText('text').insert(0, message.text ?? '');
+          }
+        } else {
           yDoc.getText('text').insert(0, message.text ?? '');
         }
-      } else {
-        yDoc.getText('text').insert(0, message.text ?? '');
+
+        const awareness = new Awareness(yDoc);
+        this.setupAwareness(message.docId, yDoc, awareness);
+
+        tracked = {
+          docId: message.docId,
+          uri: pendingShare?.uri ?? storageUri,
+          version: message.version,
+          lastSyncedText: message.text ?? (message.yjsState ? yDoc.getText('text').toString() : ''),
+          pendingSnapshot: false,
+          fileName: message.fileName,
+          languageId: message.languageId,
+          sharedDocument: pendingShare?.sharedDocument,
+          yDoc,
+          awareness
+        };
+        this.documents.set(message.docId, tracked);
       }
 
-      const awareness = new Awareness(yDoc);
-      awareness.on('update', ({ added, updated, removed }: any) => {
-        const changedClients = added.concat(updated, removed);
-        const update = encodeAwarenessUpdate(awareness, changedClients);
-        const currentRoomId = this.getEffectiveRoomId();
-        if (currentRoomId) {
-          this.sendMessage({
-            type: 'awarenessUpdate',
-            roomId: currentRoomId,
-            docId: message.docId,
-            update
-          });
-        }
-      });
-
-      awareness.on('change', () => {
-        const state = awareness.getStates();
-        for (const [clientId, userState] of state.entries()) {
-          if (clientId !== awareness.clientID && userState.cursor && this.onCursorUpdate) {
-            this.onCursorUpdate(
-              message.docId,
-              userState.cursor.userId,
-              userState.cursor.userName,
-              userState.cursor.uri,
-              userState.cursor.position,
-              userState.cursor.selections
-            );
-          }
-        }
-      });
-
-      const tracked: TrackedDocument = {
-        docId: message.docId,
-        uri: pendingShare?.uri ?? storageUri,
-        version: message.version,
-        lastSyncedText: message.text ?? '',
-        pendingSnapshot: false,
-        fileName: message.fileName,
-        languageId: message.languageId,
-        sharedDocument: pendingShare?.sharedDocument,
-        yDoc,
-        awareness
-      };
-
-      this.documents.set(message.docId, tracked);
       this.pendingShareDocs.delete(message.docId);
       this.pendingUnshares.delete(message.docId);
-      this.registerLocalMapping(message.docId, tracked.uri ?? storageUri);
+      this.registerLocalMapping(message.docId, effectiveUri!);
 
       const shouldReveal = !this.activeDocumentId || isNewRoom;
       if (!this.activeDocumentId) {
@@ -537,6 +542,38 @@ export class DocumentSync {
       logger.error(`Unable to open shared document: ${detail}`);
       void vscode.window.showErrorMessage('Unable to open shared CodeRoom document. Check storage permissions.');
     }
+  }
+
+  private setupAwareness(docId: string, yDoc: Y.Doc, awareness: Awareness): void {
+    awareness.on('update', ({ added, updated, removed }: any) => {
+      const changedClients = added.concat(updated, removed);
+      const update = encodeAwarenessUpdate(awareness, changedClients);
+      const currentRoomId = this.getEffectiveRoomId();
+      if (currentRoomId) {
+        this.sendMessage({
+          type: 'awarenessUpdate',
+          roomId: currentRoomId,
+          docId,
+          update
+        });
+      }
+    });
+
+    awareness.on('change', () => {
+      const state = awareness.getStates();
+      for (const [clientId, userState] of state.entries()) {
+        if (clientId !== awareness.clientID && userState.cursor && this.onCursorUpdate) {
+          this.onCursorUpdate(
+            docId,
+            userState.cursor.userId,
+            userState.cursor.userName,
+            userState.cursor.uri,
+            userState.cursor.position,
+            userState.cursor.selections
+          );
+        }
+      }
+    });
   }
 
   async handleFullDocumentSync(message: FullDocumentSyncMessage): Promise<void> {

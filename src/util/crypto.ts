@@ -158,3 +158,13 @@ export function generatePassphrase(): string {
 
   return randomWords.join('-');
 }
+
+/**
+ * Derives a room access key (hash) from a secret using a fixed salt.
+ * Formula: SHA-256(secret + ":CodeRoomsAccess")
+ * Used to ensure raw secrets are never sent to the server while remaining consistent
+ * across room creation and joining.
+ */
+export function deriveRoomAccessKey(secret: string): string {
+  return crypto.createHash('sha256').update(secret + ':CodeRoomsAccess').digest('hex');
+}

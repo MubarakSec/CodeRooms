@@ -16,7 +16,7 @@ import { ChatView } from './ui/ChatView';
 import { ClientToServerMessage, Participant, Role, RoomMode, ServerToClientMessage, Suggestion, SuggestionReviewAction } from './connection/MessageTypes';
 import { DEFAULT_SERVER_URL } from './util/config';
 import { logger } from './util/logger';
-import { encrypt, decrypt, type EncryptedPayload } from './util/crypto';
+import { encrypt, decrypt, deriveRoomAccessKey, type EncryptedPayload } from './util/crypto';
 import { NoticeCooldown } from './util/noticeCooldown';
 import { consumePendingRoomSecret } from './util/roomSecrets';
 import {
@@ -802,17 +802,19 @@ export function activate(context: vscode.ExtensionContext): void {
     lastJoinDisplayName = displayName;
     lastJoinSecret = secret;
     lastJoinSessionToken = undefined;
-    webSocket.send({ type: 'createRoom', displayName, mode, secret });
+    const hashedSecret = secret ? deriveRoomAccessKey(secret) : undefined;
+    webSocket.send({ type: 'createRoom', displayName, mode, secret: hashedSecret });
   }
 
   async function joinRoom(): Promise<void> {
     if (!(await ensureConnection())) {
       return;
     }
-    const roomId = await vscode.window.showInputBox({ prompt: 'Enter CodeRoom ID', ignoreFocusOut: true });
-    if (!roomId) {
+    const roomIdInput = await vscode.window.showInputBox({ prompt: 'Enter CodeRoom ID', ignoreFocusOut: true });
+    if (!roomIdInput) {
       return;
     }
+    const roomId = roomIdInput.trim();
     const displayName = await promptForDisplayName(context);
     if (!displayName) {
       return;
@@ -828,10 +830,12 @@ export function activate(context: vscode.ExtensionContext): void {
     const token = isToken ? secretOrToken : undefined;
     pendingSecret = secret; // only real passwords drive E2E; tokens don't carry a key
     lastJoinSecret = secret;
-    lastJoinRoomId = roomId.trim();
+    lastJoinRoomId = roomId;
     lastJoinDisplayName = displayName;
     lastJoinSessionToken = undefined;
-    webSocket.send({ type: 'joinRoom', roomId: roomId.trim(), displayName, secret, token });
+    const hashedSecret = secret ? deriveRoomAccessKey(secret) : undefined;
+    const stateVectors = documentSync.getStateVectors();
+    webSocket.send({ type: 'joinRoom', roomId, displayName, secret: hashedSecret, token, stateVectors });
   }
 
   function leaveRoom(): void {
@@ -1300,13 +1304,16 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     pendingSecret = secret;
     lastJoinSecret = secret;
+    const hashedSecret = secret ? deriveRoomAccessKey(secret) : undefined;
+    const stateVectors = documentSync.getStateVectors();
     webSocket.send({
       type: 'joinRoom',
       roomId: lastJoinRoomId,
       displayName: lastJoinDisplayName,
-      secret,
+      secret: hashedSecret,
       token,
-      sessionToken: lastJoinSessionToken
+      sessionToken: lastJoinSessionToken,
+      stateVectors
     });
   }
 
