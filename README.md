@@ -23,9 +23,11 @@ Real-time collaboration — no screen sharing, just shared buffers, roles, and i
 | **Persistence** | **SQLite WAL:** Room state is saved atomically to a robust database. 100% crash-proof recovery. |
 | **Scalability** | **Redis Pub/Sub:** Horizontally scalable backend. Run a cluster of CodeRooms servers to support thousands of concurrent developers. |
 | **Voice Chat** | **E2EE P2P Voice:** Integrated audio communication via WebRTC. Secure, low-latency, and private. |
+| **Shared Terminals** | Host can share read-only or read/write terminal access with collaborators directly in VS Code. |
+| **Port Forwarding** | Secure localhost tunneling allows collaborators to access web apps running on the host's machine. |
 | **Suggestion Mode** | Collaborator edits become inline suggestions. Root can review with **native CodeLenses** directly in the editor. |
 | **Workspace Sharing** | Share single files or your **entire project workspace** with a single command, featuring native progress tracking. |
-| **Modern UI** | Sleek, animated Chat Webview with frosted-glass aesthetic and native VS Code styling. |
+| **Modern UI** | Sleek, fast, minimalist flat Chat Webview with native VS Code styling and real-time activity glow. |
 | **Protocol** | **Pure Binary:** Uses `Uint8Array` and `msgpackr`. 33% more efficient than JSON/Base64 engines. |
 
 ---
@@ -65,6 +67,8 @@ In the Extension Development Host, run **CodeRooms: Start Room as Root** from th
 | Join Room | Join an existing room by ID | Anyone |
 | Join Voice Channel | Start or join the E2EE audio bridge | Anyone |
 | Share Entire Workspace | Recursively sync the project folder | Root |
+| Share Terminal | Share a read-only or read/write terminal session | Root |
+| Forward Port | Tunnel a localhost port to the room | Root |
 | Share Current File | Share the active editor document | Root |
 | Stop Sharing | Unshare the active document | Root |
 | Accept / Reject | Native inline review actions for suggestions | Root |
