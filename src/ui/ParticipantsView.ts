@@ -15,7 +15,6 @@ import {
   formatRoleLabel,
   formatRoomModeLabel
 } from './viewState';
-import { buildParticipantsViewRefreshKey } from './participantsViewRefresh';
 import { buildSuggestionChunks, buildSuggestionGroups, SuggestionChunkPlan, SuggestionGroupPlan, SUGGESTION_CHUNK_SIZE } from './suggestionBuckets';
 import { buildSuggestionPreview } from '../util/suggestionPreview';
 
@@ -291,30 +290,7 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
   }
 
   private computeRefreshKey(): string {
-    const participants = this.roomState.getParticipants();
-    return buildParticipantsViewRefreshKey({
-      roomId: this.roomState.getRoomId(),
-      role: this.roomState.getRole(),
-      mode: this.roomState.getRoomMode(),
-      collaboratorDirectMode: this.roomState.isCollaboratorInDirectMode(),
-      activeSharedDocLabel: this.roomState.getActiveSharedDocLabel(),
-      isFollowing: this.followController.isFollowing(),
-      activePendingSuggestionCount: this.documentSync.getPendingSuggestionCount(),
-      participants: participants.map(participant => ({
-        userId: participant.userId,
-        displayName: participant.displayName,
-        role: participant.role,
-        isDirectEditMode: participant.isDirectEditMode,
-        isTyping: this.roomState.isParticipantTyping(participant.userId),
-        isTalking: this.roomState.isParticipantTalking(participant.userId),
-        currentFile: this.roomState.getParticipantFile(participant.userId)
-      })),
-      documents: this.documentSync.getSharedDocuments().map(document => ({
-        ...document,
-        uri: document.uri?.toString()
-      })),
-      suggestions: this.suggestionManager.getSuggestions()
-    });
+    return `${this.roomState.stateVersion}:${this.documentSync.stateVersion}:${this.suggestionManager.stateVersion}:${this.followController.stateVersion}`;
   }
 
   private createSessionHeader(): vscode.TreeItem {

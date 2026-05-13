@@ -4,6 +4,7 @@ import { Participant, Role, RoomMode } from '../connection/MessageTypes';
 const PARTICIPANT_ACTIVITY_TTL_MS = 2_000;
 
 export class RoomState {
+  public stateVersion = 0;
   private readonly emitter = new vscode.EventEmitter<void>();
   readonly onDidChange = this.emitter.event;
 
@@ -32,6 +33,7 @@ export class RoomState {
       this.collaboratorDirectMode = false;
     }
     this.syncCollaboratorMode();
+    this.stateVersion++;
     this.emitter.fire();
   }
 
@@ -46,6 +48,7 @@ export class RoomState {
     this.talkingUsers.clear();
     this.mode = undefined;
     this.activeSharedDocLabel = undefined;
+    this.stateVersion++;
     this.emitter.fire();
   }
 
@@ -60,6 +63,7 @@ export class RoomState {
       }
     }
     this.syncCollaboratorMode();
+    this.stateVersion++;
     this.emitter.fire();
   }
 
@@ -69,6 +73,7 @@ export class RoomState {
     if (participant.userId === this.userId) {
       this.syncCollaboratorMode();
     }
+    this.stateVersion++;
     this.emitter.fire();
   }
 
@@ -80,6 +85,7 @@ export class RoomState {
     this.participantActivity.delete(userId);
     this.participantFiles.delete(userId);
     this.talkingUsers.delete(userId);
+    this.stateVersion++;
     this.emitter.fire();
   }
 
@@ -95,6 +101,7 @@ export class RoomState {
         this.collaboratorDirectMode = false;
       }
     }
+    this.stateVersion++;
     this.emitter.fire();
   }
 
@@ -107,6 +114,7 @@ export class RoomState {
     if (userId === this.userId && this.isCollaborator()) {
       this.collaboratorDirectMode = direct;
     }
+    this.stateVersion++;
     this.emitter.fire();
   }
 
@@ -160,11 +168,13 @@ export class RoomState {
 
   setParticipantActivity(userId: string, at: number): void {
     this.participantActivity.set(userId, at);
+    this.stateVersion++;
     this.emitter.fire();
   }
 
   setParticipantFile(userId: string, file: string): void {
     this.participantFiles.set(userId, file);
+    this.stateVersion++;
     this.emitter.fire();
   }
 
@@ -178,6 +188,7 @@ export class RoomState {
     } else {
       this.talkingUsers.delete(userId);
     }
+    this.stateVersion++;
     this.emitter.fire();
   }
 
@@ -191,6 +202,7 @@ export class RoomState {
     } else {
       this.mutedUsers.delete(userId);
     }
+    this.stateVersion++;
     this.emitter.fire();
   }
 

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 
 export class FollowController {
+  public stateVersion = 0;
   private followingRoot = false;
   private readonly emitter = new vscode.EventEmitter<boolean>();
 
@@ -15,6 +16,7 @@ export class FollowController {
       return;
     }
     this.followingRoot = value;
+    this.stateVersion++;
     this.emitter.fire(this.followingRoot);
   }
 

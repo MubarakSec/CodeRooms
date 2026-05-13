@@ -3,8 +3,8 @@ export interface RoomAccountingSnapshot {
   documents: Iterable<{ text: string }>;
 }
 
-export function getNextTotalDocBytes(currentTotalDocBytes: number, previousText: string, nextText: string): number {
-  return currentTotalDocBytes + Buffer.byteLength(nextText, 'utf8') - Buffer.byteLength(previousText, 'utf8');
+export function getNextTotalDocBytes(currentTotalDocBytes: number, previousBytes: number, nextBytes: number): number {
+  return currentTotalDocBytes + nextBytes - previousBytes;
 }
 
 export function rebuildAccountingFromRooms(

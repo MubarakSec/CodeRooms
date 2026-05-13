@@ -1,4 +1,4 @@
-import { randomBytes, pbkdf2, timingSafeEqual } from 'crypto';
+import { randomBytes, pbkdf2, timingSafeEqual, createHash } from 'crypto';
 import { promisify } from 'util';
 
 const pbkdf2Async = promisify(pbkdf2);
@@ -13,7 +13,8 @@ import {
   RoomMode,
   ServerToClientMessage,
   Suggestion,
-  SuggestionReviewAction
+  SuggestionReviewAction,
+  TextPatch
 } from './types';
 import { log } from './logger';
 import { RateLimiter } from './rateLimiter';
@@ -21,6 +22,8 @@ import path from 'path';
 import { pack, unpack } from 'msgpackr';
 import { getClientMessageAckKey } from '../shared/ackKeys';
 import { getNextTotalDocBytes } from './accounting';
+import { transformPatch, VersionedPatch } from './ot';
+import { applyPatch } from './patch';
 import {
   canChangeEditMode,
   canEditSharedDocument,
@@ -66,6 +69,7 @@ interface DocumentState {
   fileName: string;
   languageId?: string;
   yjsState?: Uint8Array;
+  patchHistory: VersionedPatch[];
 }
 
 interface ConnectionContext {
@@ -132,6 +136,7 @@ const MAX_CONNECTIONS_PER_IP = 20;
 const MAX_DOCUMENTS_PER_ROOM = 5000;
 const MAX_SUGGESTIONS_PER_ROOM = 100;
 const MAX_REVIEWED_SUGGESTIONS = 200;
+const OT_HISTORY_LIMIT = 50;
 const MAX_TOTAL_DOC_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB total memory budget for documents
 let totalDocBytes = 0;
 const roomCountByIp = new Map<string, number>();
@@ -1186,7 +1191,7 @@ async function joinRoomInner(
     userId: context.userId,
     role: participant.role,
     mode: room.mode,
-    ip: context.ip,
+    ip: context.ip ? createHash('sha256').update(context.ip).digest('hex').slice(0, 16) : undefined,
     reclaimedSession: resolvedJoin.reclaimedSession
   });
 }
@@ -1197,7 +1202,7 @@ async function denyJoinAttempt(
   reason: JoinFailureReason
 ): Promise<void> {
   const blocked = recordFailedJoin(context);
-  log('join_denied', { ip: context.ip, roomId, reason, blocked });
+  log('join_denied', { ip: context.ip ? createHash('sha256').update(context.ip).digest('hex').slice(0, 16) : undefined, roomId, reason, blocked });
   if (blocked) {
     return;
   }
@@ -1430,7 +1435,7 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
     return;
   }
   const existingByteLength = existing?.yjsState ? existing.yjsState.byteLength : Buffer.byteLength(existing?.text || '', 'utf8');
-  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, ' '.repeat(existingByteLength), ' '.repeat(docByteLength));
+  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, existingByteLength, docByteLength);
   if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
     rejectTrackedMessage(context.ws, message, 'Server memory limit reached. Cannot share more documents.', 'MEMORY_LIMIT');
     return;
@@ -1444,7 +1449,8 @@ function handleShareDocument(context: ConnectionContext, message: Extract<Client
     originalUri: message.originalUri,
     fileName: message.fileName,
     languageId: message.languageId,
-    yjsState: message.yjsState
+    yjsState: message.yjsState,
+    patchHistory: []
   };
 
   room.documents.set(message.docId, doc);
@@ -1522,35 +1528,63 @@ function handleDocChange(context: ConnectionContext, message: Extract<ClientToSe
     return;
   }
 
-  if (message.version <= doc.version && !message.yjsUpdate) {
+  if (!doc.patchHistory) { doc.patchHistory = []; }
+
+  let finalPatch: TextPatch | undefined = message.patch;
+  if (!message.yjsUpdate && finalPatch && doc.text !== undefined) {
+    if (message.version <= doc.version) {
+      finalPatch = transformPatch(doc.text, finalPatch, message.version, doc.patchHistory);
+      if (!finalPatch) {
+        sendAckForMessage(context.ws, message);
+        return;
+      }
+    }
+  } else if (message.version <= doc.version && !message.yjsUpdate) {
     sendAckForMessage(context.ws, message);
     return;
   }
 
   const baseByteLength = doc.yjsState ? doc.yjsState.byteLength : Buffer.byteLength(doc.text || '', 'utf8');
   // Rough estimate: new byte length is old length + size of update
-  const newByteLength = message.yjsUpdate ? baseByteLength + message.yjsUpdate.byteLength : baseByteLength + Buffer.byteLength(message.patch?.text || '', 'utf8');
+  const newByteLength = message.yjsUpdate ? baseByteLength + message.yjsUpdate.byteLength : baseByteLength + Buffer.byteLength(finalPatch?.text || '', 'utf8');
   
-  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, ' '.repeat(baseByteLength), ' '.repeat(newByteLength));
+  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, baseByteLength, newByteLength);
   if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
     rejectTrackedMessage(context.ws, message, 'Server memory limit reached. Cannot apply document change.', 'MEMORY_LIMIT');
     return;
   }
   totalDocBytes = nextTotalDocBytes;
-  doc.version += 1;
-  const newVersion = doc.version;
 
-  // We no longer apply OT locally since the server is zero-knowledge
-  // We simply track versions and relay the change.
-  if (message.yjsUpdate) {
-    // We don't apply, just relay
+  if (finalPatch && doc.text !== undefined) {
+    const nextText = applyPatch(doc.text, finalPatch);
+    if (nextText !== undefined) {
+      const baseText = doc.text;
+      doc.text = nextText;
+      doc.version += 1;
+      doc.patchHistory.push({
+        patch: finalPatch,
+        authorId: context.userId,
+        version: doc.version,
+        baseText
+      });
+      if (doc.patchHistory.length > OT_HISTORY_LIMIT) {
+        doc.patchHistory.shift();
+      }
+    } else {
+      sendAckForMessage(context.ws, message);
+      return;
+    }
+  } else {
+    doc.version += 1;
   }
+  
+  const newVersion = doc.version;
 
   broadcast(room, {
     type: 'docChangeBroadcast',
     docId: message.docId,
     version: newVersion,
-    patch: message.patch,
+    patch: finalPatch,
     yjsUpdate: message.yjsUpdate,
     authorId: context.userId
   }, context.ws);
@@ -1811,7 +1845,7 @@ function handleFullDocumentSync(
   const baseByteLength = doc.yjsState ? doc.yjsState.byteLength : Buffer.byteLength(doc.text || '', 'utf8');
   const newByteLength = message.yjsState ? message.yjsState.byteLength : Buffer.byteLength(message.text || '', 'utf8');
 
-  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, ' '.repeat(baseByteLength), ' '.repeat(newByteLength));
+  const nextTotalDocBytes = getNextTotalDocBytes(totalDocBytes, baseByteLength, newByteLength);
   if (nextTotalDocBytes > MAX_TOTAL_DOC_BYTES) {
     rejectTrackedMessage(context.ws, message, 'Server memory limit reached. Cannot apply full sync.', 'MEMORY_LIMIT');
     return;
@@ -1820,6 +1854,7 @@ function handleFullDocumentSync(
   doc.text = message.text;
   doc.version = message.version;
   doc.yjsState = message.yjsState;
+  doc.patchHistory = [];
   room.documents.set(message.docId, doc);
 
   broadcast(room, {
@@ -2205,7 +2240,7 @@ function isJoinBlocked(context: ConnectionContext): boolean {
   if (joinLimiter.isBlocked(key)) {
     sendError(context.ws, 'Too many failed attempts. Try again later.', 'RATE_LIMITED');
     context.ws.close();
-    log('join_blocked', { ip: key });
+    log('join_blocked', { ip: key === 'unknown' ? key : createHash('sha256').update(key).digest('hex').slice(0, 16) });
     return true;
   }
   return false;
@@ -2217,7 +2252,7 @@ function recordFailedJoin(context: ConnectionContext): boolean {
   if (blocked) {
     sendError(context.ws, 'Too many failed attempts. Try again later.', 'RATE_LIMITED');
     context.ws.close();
-    log('join_blocked', { ip: key });
+    log('join_blocked', { ip: key === 'unknown' ? key : createHash('sha256').update(key).digest('hex').slice(0, 16) });
   }
   return blocked;
 }

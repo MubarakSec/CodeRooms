@@ -5,6 +5,7 @@ import { DocumentSync } from './DocumentSync';
 import { buildSuggestionPreview } from '../util/suggestionPreview';
 
 export class SuggestionManager implements vscode.CodeLensProvider {
+  public stateVersion = 0;
   private suggestions = new Map<string, Suggestion>();
   private readonly decorationType: vscode.TextEditorDecorationType;
   private readonly disposables: vscode.Disposable[] = [];
@@ -240,6 +241,7 @@ export class SuggestionManager implements vscode.CodeLensProvider {
   }
 
   private emitChange(): void {
+    this.stateVersion++;
     this.changeEmitter.fire();
     this.codeLensEmitter.fire();
   }

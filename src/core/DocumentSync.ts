@@ -30,6 +30,7 @@ interface TrackedDocument {
 }
 
 export class DocumentSync {
+  public stateVersion = 0;
   private readonly documents = new Map<string, TrackedDocument>();
   private activeDocumentId?: string;
   private focusedDocumentId?: string;
@@ -623,8 +624,30 @@ export class DocumentSync {
       }
     }
 
-    // If Yjs fails or is missing, do not fall back to raw patching
-    // as this will cause document corruption without OT guarantees.
+    // Fallback to raw patching if Yjs update is missing but patches are in sequence
+    // Now safe because the server applies OT and guarantees sequential versions.
+    if (!applied && patch && version === tracked.version + 1) {
+      try {
+        const edit = new vscode.WorkspaceEdit();
+        const vsRange = new vscode.Range(
+          new vscode.Position(patch.range.start.line, patch.range.start.character),
+          new vscode.Position(patch.range.end.line, patch.range.end.character)
+        );
+        edit.replace(document.uri, vsRange, patch.text);
+
+        this.suppressChanges = true;
+        applied = await workspace.applyEdit(edit);
+        this.suppressChanges = false;
+        
+        if (applied && tracked.yDoc) {
+          const newText = document.getText();
+          tracked.yDoc.getText('text').delete(0, tracked.yDoc.getText('text').length);
+          tracked.yDoc.getText('text').insert(0, newText);
+        }
+      } catch (e) {
+        logger.error(`Failed to apply raw patch for docId=${docId}: ${String(e)}`);
+      }
+    }
 
     if (!applied) {
       this.requestFullSyncForDoc(docId);
@@ -1045,6 +1068,7 @@ export class DocumentSync {
   }
 
   private emitSharedDocChanged(): void {
+    this.stateVersion++;
     this.sharedDocEmitter.fire();
   }
 

@@ -63,6 +63,7 @@ import { ParticipantsView } from '../src/ui/ParticipantsView';
 
 function createDependencies() {
   const roomState = {
+    stateVersion: 0,
     getRoomId: () => 'room-1',
     getRole: () => 'root',
     getRoomMode: () => 'team',
@@ -76,16 +77,19 @@ function createDependencies() {
   } as any;
 
   const documentSync = {
+    stateVersion: 0,
     getPendingSuggestionCount: () => 0,
     getSharedDocuments: () => [],
     getDocumentUri: () => undefined
   } as any;
 
   const suggestionManager = {
+    stateVersion: 0,
     getSuggestions: () => []
   } as any;
 
   const followController = {
+    stateVersion: 0,
     isFollowing: () => false
   } as any;
 
@@ -137,6 +141,7 @@ describe('ParticipantsView refresh gating', () => {
 
     view.refresh();
     isTyping = true;
+    deps.roomState.stateVersion++;
     view.refresh();
 
     expect(refreshEvents).toBe(2);

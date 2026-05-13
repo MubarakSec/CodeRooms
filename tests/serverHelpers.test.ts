@@ -29,7 +29,7 @@ describe('server accounting helpers', () => {
   });
 
   it('calculates total document byte deltas correctly', () => {
-    const next = getNextTotalDocBytes(100, 'old', 'much newer text');
+    const next = getNextTotalDocBytes(100, Buffer.byteLength('old', 'utf8'), Buffer.byteLength('much newer text', 'utf8'));
     expect(next).toBe(100 - Buffer.byteLength('old', 'utf8') + Buffer.byteLength('much newer text', 'utf8'));
   });
 });
