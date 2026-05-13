@@ -174,7 +174,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }
   );
-  const participantsView = new ParticipantsView(roomState, documentSync, suggestionManager, followController);
+  const participantsView = new ParticipantsView(roomState, documentSync, suggestionManager, followController, terminalManager, portForwardManager);
   const chatView = new ChatView(chatManager, roomState);
   const cursorManager = new CursorManager();
   let lastJoinRoomId: string | undefined;

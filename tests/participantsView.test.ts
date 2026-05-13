@@ -93,7 +93,19 @@ function createDependencies() {
     isFollowing: () => false
   } as any;
 
-  return { roomState, documentSync, suggestionManager, followController };
+  const terminalManager = {
+    onDidChange: vi.fn(),
+    getSharedTerminals: () => [],
+    getRemoteTerminals: () => []
+  } as any;
+
+  const portForwardManager = {
+    onDidChange: vi.fn(),
+    getSharedPorts: () => [],
+    getLocalServers: () => []
+  } as any;
+
+  return { roomState, documentSync, suggestionManager, followController, terminalManager, portForwardManager };
 }
 
 describe('ParticipantsView refresh gating', () => {
@@ -103,7 +115,9 @@ describe('ParticipantsView refresh gating', () => {
       deps.roomState,
       deps.documentSync,
       deps.suggestionManager,
-      deps.followController
+      deps.followController,
+      deps.terminalManager,
+      deps.portForwardManager
     );
 
     let refreshEvents = 0;
@@ -131,7 +145,9 @@ describe('ParticipantsView refresh gating', () => {
       deps.roomState,
       deps.documentSync,
       deps.suggestionManager,
-      deps.followController
+      deps.followController,
+      deps.terminalManager,
+      deps.portForwardManager
     );
 
     let refreshEvents = 0;
@@ -172,11 +188,13 @@ describe('ParticipantsView refresh gating', () => {
       deps.roomState,
       deps.documentSync,
       deps.suggestionManager,
-      deps.followController
+      deps.followController,
+      deps.terminalManager,
+      deps.portForwardManager
     );
 
     const roots = await view.getChildren();
-    const suggestionSection = roots[3];
+    const suggestionSection = roots.find(r => r.contextValue === 'coderooms.block.suggestions');
     const reviewChildren = await view.getChildren(suggestionSection);
 
     expect(reviewChildren).toHaveLength(4);
@@ -199,7 +217,9 @@ describe('ParticipantsView refresh gating', () => {
       deps.roomState,
       deps.documentSync,
       deps.suggestionManager,
-      deps.followController
+      deps.followController,
+      deps.terminalManager,
+      deps.portForwardManager
     );
 
     const roots = await view.getChildren();

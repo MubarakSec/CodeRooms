@@ -5,6 +5,10 @@ vi.mock('vscode', () => ({
     showInformationMessage: vi.fn(),
     showWarningMessage: vi.fn(),
     showErrorMessage: vi.fn()
+  },
+  EventEmitter: class {
+    event = vi.fn();
+    fire = vi.fn();
   }
 }));
 

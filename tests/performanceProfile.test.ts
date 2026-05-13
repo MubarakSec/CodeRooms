@@ -228,7 +228,17 @@ function createParticipantsView(scenario: RoomScaleScenario) {
   const followController = {
     isFollowing: () => false
   } as any;
-  return new ParticipantsView(roomState, documentSync, suggestionManager, followController);
+  const terminalManager = {
+    onDidChange: vi.fn(),
+    getSharedTerminals: () => [],
+    getRemoteTerminals: () => []
+  } as any;
+  const portForwardManager = {
+    onDidChange: vi.fn(),
+    getSharedPorts: () => [],
+    getLocalServers: () => []
+  } as any;
+  return new ParticipantsView(roomState, documentSync, suggestionManager, followController, terminalManager, portForwardManager);
 }
 
 async function materializeTree(view: ParticipantsView): Promise<void> {
