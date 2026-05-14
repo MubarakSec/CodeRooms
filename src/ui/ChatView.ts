@@ -239,8 +239,8 @@ export class ChatView implements vscode.WebviewViewProvider {
 
       /* Messages Area */
       .messages {
-        flex: 1; padding: 12px; overflow-y: auto;
-        display: flex; flex-direction: column; gap: 12px;
+        flex: 1; padding: 16px; overflow-y: auto;
+        display: flex; flex-direction: column; gap: 16px;
       }
       .messages::-webkit-scrollbar { width: 6px; }
       .messages::-webkit-scrollbar-track { background: transparent; }
@@ -250,7 +250,7 @@ export class ChatView implements vscode.WebviewViewProvider {
       /* Date Divider */
       .date-divider {
         display: flex; align-items: center; justify-content: center;
-        margin: 16px 0 8px; font-size: 10px; font-weight: 600;
+        margin: 20px 0 12px; font-size: 10px; font-weight: 600;
         color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;
       }
       .date-divider::before, .date-divider::after {
@@ -260,7 +260,7 @@ export class ChatView implements vscode.WebviewViewProvider {
       /* Chat Row */
       .chat-row {
         display: flex; flex-direction: column;
-        max-width: 85%;
+        max-width: 88%;
         animation: none;
       }
       
@@ -268,7 +268,7 @@ export class ChatView implements vscode.WebviewViewProvider {
       .chat-row.self { align-self: flex-end; }
 
       .msg-meta {
-        font-size: 11px; margin-bottom: 4px; color: var(--text-dim);
+        font-size: 11px; margin-bottom: 6px; color: var(--text-dim);
         display: flex; align-items: center; gap: 6px;
       }
       .chat-row.other .msg-meta { margin-left: 4px; }
@@ -277,9 +277,9 @@ export class ChatView implements vscode.WebviewViewProvider {
       .msg-name { font-weight: 600; color: var(--text-main); }
       
       .bubble {
-        padding: 8px 12px; font-size: 13px; line-height: 1.45;
+        padding: 10px 14px; font-size: 13px; line-height: 1.5;
         word-break: break-word; position: relative;
-        border-radius: 4px;
+        border-radius: 8px;
         box-shadow: none;
         border: 1px solid var(--border);
       }

@@ -296,8 +296,17 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
     const roomId = this.roomState.getRoomId();
     if (roomId) {
       roots.push(this.createWorkHeader());
-      roots.push(this.createTerminalsHeader());
-      roots.push(this.createPortsHeader());
+      
+      const terminalsTotal = this.terminalManager.getSharedTerminals().length + this.terminalManager.getRemoteTerminals().length;
+      if (terminalsTotal > 0) {
+        roots.push(this.createTerminalsHeader());
+      }
+      
+      const portsTotal = this.portForwardManager.getSharedPorts().length + this.portForwardManager.getLocalServers().length;
+      if (portsTotal > 0) {
+        roots.push(this.createPortsHeader());
+      }
+      
       roots.push(this.createPeopleHeader());
       roots.push(this.createSuggestionsHeader());
     }
@@ -405,6 +414,8 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
       if (this.roomState.isRoot()) {
         items.push(new ActionItem('Share current file', 'coderooms.shareCurrentFile', [], new vscode.ThemeIcon('cloud-upload')));
         items.push(new ActionItem('Share entire workspace', 'coderooms.shareWorkspace', [], new vscode.ThemeIcon('folder-library')));
+        items.push(new ActionItem('Share terminal', 'coderooms.shareTerminal', [], new vscode.ThemeIcon('terminal')));
+        items.push(new ActionItem('Forward port', 'coderooms.forwardPort', [], new vscode.ThemeIcon('globe')));
         items.push(new ActionItem('Stop sharing current file', 'coderooms.unshareCurrentFile', [], new vscode.ThemeIcon('close')));
       } else if (this.roomState.isCollaborator() && !this.roomState.isCollaboratorInDirectMode()) {
         const pending = this.documentSync.getPendingSuggestionCount();
@@ -444,22 +455,14 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
     const shared = this.terminalManager.getSharedTerminals();
     const remote = this.terminalManager.getRemoteTerminals();
 
-    if (shared.length === 0 && remote.length === 0) {
-      if (this.roomState.isRoot()) {
-        items.push(new ActionItem('Share terminal', 'coderooms.shareTerminal', [], new vscode.ThemeIcon('terminal')));
-      } else {
-        items.push(new InfoItem('No shared terminals', 'Waiting for owner to share a terminal', new vscode.ThemeIcon('clock')));
-      }
-    } else {
-      for (const t of shared) {
-        items.push(new InfoItem(t.name, 'Shared by you', new vscode.ThemeIcon('terminal')));
-      }
-      for (const t of remote) {
-        items.push(new InfoItem(t.name, 'Shared by owner', new vscode.ThemeIcon('terminal')));
-      }
-      if (this.roomState.isRoot()) {
-        items.push(new ActionItem('Share terminal', 'coderooms.shareTerminal', [], new vscode.ThemeIcon('plus')));
-      }
+    for (const t of shared) {
+      items.push(new InfoItem(t.name, 'Shared by you', new vscode.ThemeIcon('terminal')));
+    }
+    for (const t of remote) {
+      items.push(new InfoItem(t.name, 'Shared by owner', new vscode.ThemeIcon('terminal')));
+    }
+    if (this.roomState.isRoot()) {
+      items.push(new ActionItem('Share another terminal', 'coderooms.shareTerminal', [], new vscode.ThemeIcon('plus')));
     }
     return items;
   }
@@ -477,28 +480,20 @@ export class ParticipantsView implements vscode.TreeDataProvider<vscode.TreeItem
     const shared = this.portForwardManager.getSharedPorts();
     const local = this.portForwardManager.getLocalServers();
 
-    if (shared.length === 0 && local.length === 0) {
-      if (this.roomState.isRoot()) {
-        items.push(new ActionItem('Forward port', 'coderooms.forwardPort', [], new vscode.ThemeIcon('globe')));
-      } else {
-        items.push(new InfoItem('No forwarded ports', 'Waiting for owner to forward a port', new vscode.ThemeIcon('clock')));
-      }
-    } else {
-      for (const p of shared) {
-        items.push(new InfoItem(`Port ${p}`, 'Forwarded by you', new vscode.ThemeIcon('plug')));
-      }
-      for (const p of local) {
-        const item = new InfoItem(`Port ${p}`, 'Forwarded by owner', new vscode.ThemeIcon('plug'));
-        item.command = {
-          command: 'vscode.open',
-          title: 'Open in Browser',
-          arguments: [vscode.Uri.parse(`http://localhost:${p}`)]
-        };
-        items.push(item);
-      }
-      if (this.roomState.isRoot()) {
-        items.push(new ActionItem('Forward port', 'coderooms.forwardPort', [], new vscode.ThemeIcon('plus')));
-      }
+    for (const p of shared) {
+      items.push(new InfoItem(`Port ${p}`, 'Forwarded by you', new vscode.ThemeIcon('plug')));
+    }
+    for (const p of local) {
+      const item = new InfoItem(`Port ${p}`, 'Forwarded by owner', new vscode.ThemeIcon('plug'));
+      item.command = {
+        command: 'vscode.open',
+        title: 'Open in Browser',
+        arguments: [vscode.Uri.parse(`http://localhost:${p}`)]
+      };
+      items.push(item);
+    }
+    if (this.roomState.isRoot()) {
+      items.push(new ActionItem('Forward another port', 'coderooms.forwardPort', [], new vscode.ThemeIcon('plus')));
     }
     return items;
   }
