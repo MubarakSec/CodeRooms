@@ -7,6 +7,9 @@ import * as os from 'os';
 export class TerminalManager {
   private disposables: vscode.Disposable[] = [];
   
+  private readonly _onDidChange = new vscode.EventEmitter<void>();
+  public readonly onDidChange = this._onDidChange.event;
+  
   // Host state
   private sharedTerminals = new Map<string, { terminal: vscode.Terminal, process: cp.ChildProcess, isReadOnly: boolean }>();
   
@@ -26,6 +29,7 @@ export class TerminalManager {
           if (entry.terminal === terminal) {
             entry.process.kill();
             this.sharedTerminals.delete(id);
+            this._onDidChange.fire();
             this.sendTerminalClose(id);
             return;
           }
@@ -34,6 +38,7 @@ export class TerminalManager {
         for (const [id, t] of this.remoteTerminals.entries()) {
           if (t.terminal === terminal) {
             this.remoteTerminals.delete(id);
+            this._onDidChange.fire();
             return;
           }
         }
@@ -93,9 +98,26 @@ export class TerminalManager {
 
     const terminal = vscode.window.createTerminal({ name: `Shared Shell`, pty });
     this.sharedTerminals.set(id, { terminal, process: child, isReadOnly });
+    this._onDidChange.fire();
     this.sendTerminalCreate(id, 'Shared Shell', isReadOnly);
     terminal.show();
     logger.info(`Started sharing terminal (id: ${id}, readOnly: ${isReadOnly})`);
+  }
+
+  public getSharedTerminals(): { id: string, name: string, isReadOnly: boolean }[] {
+    const list: { id: string, name: string, isReadOnly: boolean }[] = [];
+    for (const [id, t] of this.sharedTerminals.entries()) {
+      list.push({ id, name: t.terminal.name, isReadOnly: t.isReadOnly });
+    }
+    return list;
+  }
+
+  public getRemoteTerminals(): { id: string, name: string }[] {
+    const list: { id: string, name: string }[] = [];
+    for (const [id, t] of this.remoteTerminals.entries()) {
+      list.push({ id, name: t.terminal.name });
+    }
+    return list;
   }
 
   // Called on the Host when a collaborator types
@@ -137,6 +159,7 @@ export class TerminalManager {
     const modeStr = isReadOnly ? 'Read-Only' : 'Read/Write';
     const terminal = vscode.window.createTerminal({ name: `[Remote] ${name} (${modeStr})`, pty });
     this.remoteTerminals.set(terminalId, { terminal, writeEmitter });
+    this._onDidChange.fire();
     terminal.show();
   }
 
@@ -152,6 +175,7 @@ export class TerminalManager {
     if (remote) {
       remote.terminal.dispose();
       this.remoteTerminals.delete(terminalId);
+      this._onDidChange.fire();
     }
   }
 
@@ -165,6 +189,7 @@ export class TerminalManager {
       shared.terminal.dispose();
     }
     this.sharedTerminals.clear();
+    this._onDidChange.fire();
   }
 
   public dispose(): void {

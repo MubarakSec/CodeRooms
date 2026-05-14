@@ -8,6 +8,9 @@ import { URL } from 'url';
 export class PortForwardManager {
   private disposables: vscode.Disposable[] = [];
   
+  private readonly _onDidChange = new vscode.EventEmitter<void>();
+  public readonly onDidChange = this._onDidChange.event;
+  
   // Host state
   private sharedPorts = new Set<number>();
   
@@ -23,6 +26,14 @@ export class PortForwardManager {
     private readonly sendTunnelResponse: (requestId: string, statusCode: number, headers: Record<string, string>, body?: string, error?: string) => void
   ) {}
 
+  public getSharedPorts(): number[] {
+    return Array.from(this.sharedPorts);
+  }
+
+  public getLocalServers(): number[] {
+    return Array.from(this.localServers.keys());
+  }
+
   // --- Host Methods ---
 
   public sharePort(port: number): void {
@@ -31,6 +42,7 @@ export class PortForwardManager {
       return;
     }
     this.sharedPorts.add(port);
+    this._onDidChange.fire();
     this.sendTunnelStart(port);
     logger.info(`Started sharing port ${port}`);
     void vscode.window.showInformationMessage(`Sharing port ${port} with the room.`);
@@ -131,10 +143,13 @@ export class PortForwardManager {
 
     server.listen(port, '127.0.0.1', () => {
       logger.info(`Collaborator listening on localhost:${port} to proxy to host.`);
+      this._onDidChange.fire();
       void vscode.window.showInformationMessage(`Host is sharing port ${port}. You can access it at http://localhost:${port}`);
     });
 
     this.localServers.set(port, server);
+    // Also fire right away so it shows up in UI as 'starting...' or similar if we wanted,
+    // but the listen callback is fast enough.
   }
 
   public handleTunnelResponse(requestId: string, statusCode: number, headers: Record<string, string>, body?: string, error?: string): void {
@@ -179,6 +194,7 @@ export class PortForwardManager {
       server.close();
     }
     this.localServers.clear();
+    this._onDidChange.fire();
   }
 
   public dispose(): void {
