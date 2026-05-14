@@ -44,14 +44,15 @@ export class CursorManager {
       const cursor = vscode.window.createTextEditorDecorationType({
         after: {
           contentText: ' \u200B',
-          textDecoration: `none; border-left: 2px solid ${color}; margin-left: -1px; position: absolute;`
+          textDecoration: `none; border-left: 2px solid ${color}; margin-left: -1px; position: absolute; transition: all 0.15s ease-out;`
         },
         rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed
       });
 
       const selection = vscode.window.createTextEditorDecorationType({
         backgroundColor: `${color}40`, // 25% opacity
-        borderRadius: '2px'
+        borderRadius: '2px',
+        textDecoration: 'transition: all 0.15s ease-out;'
       });
 
       const activityGlow = vscode.window.createTextEditorDecorationType({

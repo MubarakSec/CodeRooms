@@ -1493,6 +1493,15 @@ export function activate(context: vscode.ExtensionContext): void {
         sendClientMessage({ type: 'voiceMute', roomId, userId, muted });
       }
     }),
+    vscode.commands.registerCommand('coderooms.toggleVoiceMute', () => {
+      const roomId = roomState.getRoomId();
+      const userId = roomState.getUserId();
+      if (roomId && userId) {
+        // Toggle based on current state (we assume muted by default unless talking)
+        const isTalking = roomState.isParticipantTalking(userId);
+        sendClientMessage({ type: 'voiceMute', roomId, userId, muted: isTalking });
+      }
+    }),
     vscode.commands.registerCommand('coderooms.leaveVoice', () => {
       // We can't close the browser tab directly, but we can tell the server
       // to drop our voice connection, which will trigger the bridge to show "Disconnected".

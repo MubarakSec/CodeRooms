@@ -106,7 +106,7 @@ const patch = {
 };
 
 describe('DocumentSync applyRemoteChange fallback', () => {
-  it('requests full sync after two failed patch applications and warns user', async () => {
+  it('requests full sync after two failed patch applications without warning user', async () => {
     const sent: any[] = [];
     const sync = new DocumentSync(fakeRoomState, fakeStorage, (msg) => sent.push(msg as any));
     const yDoc = new Y.Doc();
@@ -126,6 +126,6 @@ describe('DocumentSync applyRemoteChange fallback', () => {
 
     expect(sent.length).toBe(1);
     expect(sent[0].type).toBe('requestFullSync');
-    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });

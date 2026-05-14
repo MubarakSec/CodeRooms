@@ -126,6 +126,7 @@ let chatLimiter = new RateLimiter(10_000, 10, 30_000);
 let suggestionLimiter = new RateLimiter(30_000, 5, 60_000);
 let cursorLimiter = new RateLimiter(1_000, 120, 5_000);
 let activityLimiter = new RateLimiter(5_000, 20, 10_000);
+let messageLimiter = new RateLimiter(10_000, 2000, 60_000); // 2000 msgs / 10s max
 const MAX_CHAT_MESSAGES = 500;
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const inviteTokens = new Map<string, { roomId: string; label?: string; createdAt: number }>();
@@ -313,6 +314,7 @@ function resetInMemoryState(): void {
   suggestionLimiter = new RateLimiter(30_000, 5, 60_000);
   cursorLimiter = new RateLimiter(1_000, 120, 5_000);
   activityLimiter = new RateLimiter(5_000, 20, 10_000);
+  messageLimiter = new RateLimiter(10_000, 2000, 60_000); // 2000 msgs / 10s max
   roomOperationGuards = createRoomOperationGuards();
 }
 
@@ -433,6 +435,7 @@ function startBackgroundTasks(idleRoomTimeoutMs: number): void {
     suggestionLimiter.cleanup();
     cursorLimiter.cleanup();
     activityLimiter.cleanup();
+    messageLimiter.cleanup();
   }, DEFAULT_CLEANUP_INTERVAL_MS);
 }
 
@@ -455,6 +458,16 @@ function attachConnectionHandlers(wss: WebSocketServer): void {
 
     ws.on('message', payload => {
       try {
+        if (messageLimiter.isBlocked(context.userId)) {
+          ws.close(1008, 'Rate limit exceeded');
+          return;
+        }
+        if (messageLimiter.recordFailure(context.userId)) {
+          log('rate_limit', { type: 'global_message', userId: context.userId, ip });
+          ws.close(1008, 'Rate limit exceeded');
+          return;
+        }
+
         const byteLength = Buffer.isBuffer(payload)
           ? payload.byteLength
           : Array.isArray(payload)

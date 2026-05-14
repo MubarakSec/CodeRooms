@@ -299,9 +299,15 @@ export class ChatView implements vscode.WebviewViewProvider {
       .bubble a:hover { opacity: 1; }
 
       /* Talking State */
+      @keyframes pulseBorder {
+        0% { border-color: var(--vscode-charts-green); box-shadow: 0 0 0 0 rgba(137, 210, 135, 0.4); }
+        70% { border-color: var(--vscode-charts-green); box-shadow: 0 0 0 4px rgba(137, 210, 135, 0); }
+        100% { border-color: var(--vscode-charts-green); box-shadow: 0 0 0 0 rgba(137, 210, 135, 0); }
+      }
       .chat-row.talking .bubble {
         border-color: var(--vscode-charts-green);
         border-width: 2px;
+        animation: pulseBorder 1.5s infinite;
       }
 
       /* Typing Indicator */

@@ -51,6 +51,7 @@
         "onCommand:coderooms.reconnect",
         "onCommand:coderooms.focusChatInput",
         "onCommand:coderooms.joinVoice",
+        "onCommand:coderooms.toggleVoiceMute",
         "onCommand:coderooms.generateInviteToken",
         "onView:coderoomsChatView"
     ],
@@ -216,6 +217,10 @@
             {
                 "command": "coderooms.joinVoice",
                 "title": "CodeRooms: Join Voice Channel"
+            },
+            {
+                "command": "coderooms.toggleVoiceMute",
+                "title": "CodeRooms: Toggle Voice Mute (Push-to-Talk)"
             },
             {
                 "command": "coderooms.setActiveDocument",

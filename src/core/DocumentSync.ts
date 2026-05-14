@@ -8,7 +8,6 @@ import { ClientToServerMessage, Position, ServerToClientMessage, Suggestion, Tex
 import { RoomState } from './RoomState';
 import { RoomStorage } from './RoomStorage';
 import { logger } from '../util/logger';
-import { getDocumentResyncNotice } from '../util/roomNotices';
 import { encryptBinary, decryptBinary } from '../util/crypto';
 
 type ShareDocumentMessage = Extract<ServerToClientMessage, { type: 'shareDocument' }>;
@@ -688,19 +687,10 @@ export class DocumentSync {
 
     if (!applied) {
       this.requestFullSyncForDoc(docId);
-      void vscode.window.showWarningMessage(getDocumentResyncNotice(), 'Retry now').then(action => {
-        if (action === 'Retry now') {
-          const roomId = this.getEffectiveRoomId();
-          if (!roomId) {
-            return;
-          }
-          this.sendMessage({
-            type: 'requestFullSync',
-            roomId,
-            docId
-          });
-        }
-      });
+      // Suppress the warning if we are actively reconnecting, or if we have a way to check.
+      // We can just log it and rely on the automatic full sync request instead of a popup.
+      logger.warn(`Document ${docId} desynced. Automatically requested full sync.`);
+      // We removed the showWarningMessage popup here for better offline/reconnect UX.
       return;
     }
 
